@@ -1,4 +1,5 @@
 import { Html, Head, Main, NextScript } from "next/document";
+import { deriveTheme, deriveFonts } from "../lib/theme";
 
 export default function Document() {
   return (
@@ -11,14 +12,23 @@ export default function Document() {
           href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"
           rel="stylesheet"
         />
-        <meta name="apple-mobile-web-app-capable" content="yes" />
-        <meta name="apple-mobile-web-app-status-bar-style" content="black" />
-        <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
         <link rel="manifest" href="/manifest.json" />
-        <meta name="apple-mobile-web-app-title" content="Hooks Workout Demo" />
+        <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+        <meta name="apple-mobile-web-app-capable" content="yes" />
+        <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+        <meta name="apple-mobile-web-app-title" content="CapitalGains Demo" />
         <meta name="theme-color" content="#000000" />
-        <title>Hooks Workout — Demo</title>
-        <meta name="robots" content="noindex" />
+        <title>Capital Gains Demo: strength tracker</title>
+        <meta name="description" content="Track every lift and never stall. Log sets, see your strength as a stock chart, and get a target for your next session." />
+        <meta property="og:title" content="Capital Gains" />
+        <meta property="og:description" content="Track every lift and never stall." />
+        <meta property="og:image" content="/og.png" />
+        <meta name="twitter:card" content="summary_large_image" />
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `(function(){try{var derive=${deriveTheme.toString()};var fonts=${deriveFonts.toString()};var s=JSON.parse(localStorage.getItem('hooksSettings')||'{}');var t=derive(s.mode||'dark',s.accent||'#ff6600',window.matchMedia&&window.matchMedia('(prefers-color-scheme: light)').matches,s.gl);var r=document.documentElement;r.setAttribute('data-theme',t.scheme);for(var k in t.vars){r.style.setProperty(k,t.vars[k]);}var f=fonts(s.fontV===2?s.fontText:'ibm-plex-sans',s.fontNum);for(var k2 in f){r.style.setProperty(k2,f[k2]);}if(s.glass){r.setAttribute('data-nav','glass');}try{var sb=document.querySelector('meta[name="apple-mobile-web-app-status-bar-style"]');if(sb){sb.setAttribute('content',t.scheme==='light'?'default':'black-translucent');}var tc=document.querySelector('meta[name="theme-color"]');if(tc){tc.setAttribute('content',t.themeColor);}}catch(e2){}if(s.dotNums!==false){r.setAttribute('data-dotnums','on');}}catch(e){}})();`,
+          }}
+        />
       </Head>
       <body>
         <Main />

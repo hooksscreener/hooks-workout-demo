@@ -1,6 +1,6 @@
 {
-  "name": "Hooks Workout Demo",
-  "short_name": "Hooks Demo",
+  "name": "Hooks Workout",
+  "short_name": "Hooks",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#000000",

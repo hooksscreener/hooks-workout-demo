@@ -1,6 +1,15 @@
-import { useState, useEffect, useMemo, useRef } from "react";
+import { LEGAL_DOCS } from "../lib/legal";
+import Breakdown from "../lib/Breakdown";
+import { growthByCategory } from "../lib/analysis";
+import { LegalBody } from "../lib/LegalPage";
+import { useState, useEffect, useMemo, useRef, useLayoutEffect, memo } from "react";
+import { deriveTheme, deriveFonts } from "../lib/theme";
+import { filterFeed, FEED_MODES } from "../lib/feedFilter";
+import { mockSocial } from "../lib/mockSocial";
+import { compareWeight } from "../lib/compare";
+import { unlockAudio, playClick, playWoodTriple, playBell, vibrate, VIBE } from "../lib/fx";
 
-const LINE_COLORS = ["#ff6600", "#00d4ff", "#ffb000", "#ff3b3b", "#7CFC00", "#c792ea", "#ff6ec7", "#5ee6d0", "#a0d911", "#9a8c98"];
+const LINE_COLORS = ["#00d4ff", "#c792ea", "#ffd60a", "#ff6ec7", "#5ee6d0", "#9a8c98", "#8ab4ff", "#e0c3fc", "#b8b8ff", "#a0a0a0"];
 
 const DEFAULT_WORKOUTS = [
   { id: "push", name: "Push" },
@@ -15,19 +24,41 @@ const DEFAULT_EXERCISES = {
   legsA: ["Squats", "Leg Press", "Leg Curls", "Calf Raises", "Romanian Deadlift", "Lunges", "Bulgarian Split Squat", "Hip Thrust", "Standing Calf Raise", "Pendulum Squat", "Seated Leg Press", "Leg Extensions", "Sus Machine", "Hack Squat", "Goblet Squat", "Glute Bridge", "Seated Calf Raise"],
 };
 const RANGE_PRESETS = [
-  { key: "1w", label: "1W", days: 7 }, { key: "1m", label: "1M", days: 30 }, { key: "3m", label: "3M", days: 90 },
-  { key: "6m", label: "6M", days: 182 }, { key: "8m", label: "8M", days: 243 }, { key: "10m", label: "10M", days: 304 },
-  { key: "1y", label: "1Y", days: 365 }, { key: "all", label: "ALL", days: 36500 },
+  { key: "1m", label: "1M", days: 30 }, { key: "3m", label: "3M", days: 90 }, { key: "6m", label: "6M", days: 182 },
+  { key: "ytd", label: "YTD" }, { key: "1y", label: "1Y", days: 365 }, { key: "all", label: "ALL", days: 36500 },
+];
+const MA_OPTIONS = [
+  { key: "30", label: "30D avg", days: 30 }, { key: "90", label: "90D avg", days: 90 },
+  { key: "365", label: "1Y avg", days: 365 }, { key: "off", label: "Off", days: 0 },
 ];
 const MONTH_NAMES = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 const WD = ["S","M","T","W","T","F","S"];
+const RANGE_WORDS = { "1m": "the last month", "3m": "the last 3 months", "6m": "the last 6 months", ytd: "this year", "1y": "the last year", all: "all time" };
+const BUILD_TAG = "Demo · Build 65";
+const MACHINE_BRANDS = ["Hammer Strength", "Life Fitness", "Cybex", "Hoist", "Precor", "Technogym", "Matrix", "Nautilus", "Gym80", "Panatta", "Atlantis", "Body-Solid", "Prime", "Rogue", "Arsenal Strength", "Plate Loaded", "Cable", "Smith Machine"];
+const PASSCODE_KEY = "hooksAppPasscode";
+const DEMO = true; // demo build: no passcode, no server; sample data lives in this browser only
+const CACHE_KEY = "hooksDemoCache";     // last full copy of your data, kept on this phone so the app opens offline
+const PENDING_KEY = "hooksPending"; // "1" while this phone has changes the server has not received yet
 
 const pad = (n) => String(n).padStart(2, "0");
 const toISO = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 const todayISO = () => toISO(new Date());
-const fmtDate = (iso) => { const [y, m, d] = iso.split("-"); const base = `${["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][+m - 1]} ${+d}`; return +y === new Date().getFullYear() ? base : `${base} '${String(y).slice(2)}`; };
+// Dates from an earlier year carry a 'yy suffix so "Aug 23" can't be mistaken for this year's.
+const fmtDate = (iso) => { const [y, m, d] = iso.split("-"); const yr = +y < new Date().getFullYear() ? ` '${y.slice(2)}` : ""; return `${["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][+m - 1]} ${+d}${yr}`; };
 const fmtDateFull = (iso) => { if (iso === todayISO()) return `Today, ${fmtDate(iso)}`; const d = new Date(iso + "T00:00:00"); return d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" }); };
 const shiftDate = (iso, delta) => { const d = new Date(iso + "T00:00:00"); d.setDate(d.getDate() + delta); return toISO(d); };
+// Which range an exercise page is showing: ALL runs through the chosen date, the others run up to today.
+const xRangeOf = (x) => (x && (x.range || (x.ytd ? "ytd" : "all"))) || "all";
+const X_RANGE_PER = { "1m": "in the last month", "3m": "in the last 3 months", "6m": "in the last 6 months", ytd: "this year", "1y": "in the last year", all: "in this range" };
+const rangeCutoffISO = (key) => {
+  if (key === "ytd") return `${new Date().getFullYear()}-01-01`;
+  const r = RANGE_PRESETS.find((x) => x.key === key);
+  return shiftDate(todayISO(), -(r && r.days ? r.days : 90));
+};
+// Weeks run Monday to Sunday.
+const weekStartISO = (iso) => { const d = new Date(iso + "T00:00:00"); d.setDate(d.getDate() - ((d.getDay() + 6) % 7)); return toISO(d); };
+const daysBetween = (a, b) => Math.round((new Date(b + "T00:00:00") - new Date(a + "T00:00:00")) / 86400000);
 
 function CalendarPopup({ selectedDate, onSelect, onClose }) {
   const initial = new Date(selectedDate + "T00:00:00");
@@ -63,94 +94,605 @@ function CalendarPopup({ selectedDate, onSelect, onClose }) {
   );
 }
 
-const INK = "var(--ink)";
-const CARD_INK = "var(--card)";
-const estE1RM = (weight, reps) => (reps > 0 ? Math.round(weight * (1 + reps / 30)) : weight);
+const INK = "var(--bg)";
+const CARD_INK = "var(--surface)";
+// Epley, but reps above 10 count as 10: the formula is only dependable up to about 10 reps, and past
+// that it keeps adding ~3% per rep, which reads like a max nobody could actually lift.
+const E1RM_REP_CAP = 10;
+const BW_REP_CAP = 30; // bodyweight lifts (pull-ups, dips) are done for higher reps, so a higher cap lets rep gains show up
+const estE1RM = (weight, reps, bw = false) => (reps > 0 ? Math.round(weight * (1 + Math.min(reps, bw ? BW_REP_CAP : E1RM_REP_CAP) / 30)) : weight);
+const e1 = (e) => estE1RM(e.weight, e.reps, !!e.bw); // est. 1RM of an entry; entries flagged bw use the higher rep cap
+// How a set's weight reads on screen. Bodyweight sets say BW plus whatever was added.
+const bwLabel = (added, W, unit) => (added > 0 ? `BW + ${W(added)} ${unit}` : added < 0 ? `BW - ${W(-added)} ${unit}` : "BW");
+const setWt = (e, W, unit, isBwEx = false) => (e.bw ? bwLabel(e.added, W, unit) : isBwEx || !(e.weight > 0) ? bwLabel(e.weight || 0, W, unit) : `${W(e.weight)} ${unit}`);
 
-function SvgChart({ rows, series, mode, metric }) {
+// The one set that represents a day for an exercise: highest score on the chosen metric, then the
+// heavier weight, then more reps (so 225x8 beats 225x6 logged the same day).
+const setScore = (e, metric) => (metric === "weight" ? e.weight : metric === "reps" ? e.reps : e1(e));
+const pickBest = (cur, e, metric = "e1rm") => {
+  if (!cur) return e;
+  const a = setScore(e, metric), b = setScore(cur, metric);
+  if (a !== b) return a > b ? e : cur;
+  if (e.weight !== cur.weight) return e.weight > cur.weight ? e : cur;
+  return (e.reps || 0) > (cur.reps || 0) ? e : cur;
+};
+
+// Press-and-hold scrubbing for the line charts, the way brokerage apps do it: hold (or drag with a
+// mouse) to read any point, let go and the readout disappears. A touch that starts out moving
+// mostly vertically is handed back to the page as an ordinary scroll, since the chart itself has
+// native touch scrolling switched off so the hold gesture can't be interrupted.
+function useHoldScrub(getIndex, onIndex, elRef) {
+  const mode = useRef(null); // null | "pending" | "scrub" | "scroll"
+  const start = useRef({ x: 0, y: 0 });
+  const timer = useRef(null);
+  const attached = useRef(null);
+  const HOLD_MS = 150, MOVE = 8;
+  const apply = (clientX) => { const i = getIndex(clientX); if (i !== null) onIndex(i); };
+  const clearTimer = () => { if (timer.current) { clearTimeout(timer.current); timer.current = null; } };
+  // The chart allows vertical panning natively (touch-action: pan-y), so swiping up or down over it
+  // scrolls the page like anywhere else. Once a hold has turned into a scrub we cancel the browser's
+  // scroll so the finger can drift without the page moving.
+  useEffect(() => {
+    const el = elRef && elRef.current;
+    if (!el || attached.current === el) return undefined;
+    attached.current = el;
+    const guard = (ev) => { if (mode.current === "scrub") { if (ev.cancelable) ev.preventDefault(); holdPage(); } };
+    el.addEventListener("touchmove", guard, { passive: false });
+    return undefined;
+  });
+  // While scrubbing, the page must not move at all, even if the finger drifts up or down. Three layers,
+  // because iOS sometimes makes touchmove uncancelable once it has started a pan: cancel the move,
+  // freeze the page with overflow hidden, and snap back if it moved anyway.
+  const pageY = useRef(0);
+  const lockPage = () => { pageY.current = window.scrollY; document.documentElement.classList.add("scrub-lock"); };
+  const holdPage = () => { if (window.scrollY !== pageY.current) window.scrollTo(0, pageY.current); };
+  const unlockPage = () => { document.documentElement.classList.remove("scrub-lock"); };
+  useEffect(() => unlockPage, []);
+  const onPointerDown = (e) => {
+    if (e.pointerType === "touch") {
+      mode.current = "pending";
+      start.current = { x: e.clientX, y: e.clientY };
+      clearTimer();
+      timer.current = setTimeout(() => { if (mode.current === "pending") { mode.current = "scrub"; lockPage(); apply(start.current.x); } }, HOLD_MS);
+    } else {
+      mode.current = "scrub";
+      apply(e.clientX);
+    }
+  };
+  const onPointerMove = (e) => {
+    if (e.pointerType !== "touch") { if (mode.current === "scrub") apply(e.clientX); return; }
+    if (mode.current === "pending") {
+      const dx = e.clientX - start.current.x, dy = e.clientY - start.current.y;
+      if (Math.abs(dy) > MOVE && Math.abs(dy) > Math.abs(dx)) { mode.current = "scroll"; clearTimer(); return; }
+      if (Math.abs(dx) > MOVE) { mode.current = "scrub"; clearTimer(); lockPage(); apply(e.clientX); return; }
+    }
+    if (mode.current === "scrub") { holdPage(); apply(e.clientX); }
+  };
+  const end = () => { clearTimer(); if (mode.current === "scrub") onIndex(null); mode.current = null; unlockPage(); };
+  return { onPointerDown, onPointerMove, onPointerUp: end, onPointerCancel: end, onPointerLeave: end };
+}
+const NO_SELECT = { userSelect: "none", WebkitUserSelect: "none", WebkitTouchCallout: "none" };
+
+// Best set of each day as an estimated 1RM, as a % change from the first point, one row per calendar
+// day (days off carry the last value forward). Used by the exercise page and the carousel cards.
+function buildExSeries(list, fromISO, toISOd, repsMode = false) {
+  const byDay = {};
+  list.forEach((e) => { if (!e.isWarmup) byDay[e.date] = pickBest(byDay[e.date], e, repsMode ? "reps" : "e1rm"); });
+  const dates = Object.keys(byDay).sort().filter((d) => d >= fromISO && d <= toISOd);
+  if (dates.length < 2) return null;
+  const val = (d) => (repsMode ? byDay[d].reps : e1(byDay[d]));
+  const base = val(dates[0]);
+  const rows = [];
+  let cur = base;
+  for (let d = dates[0]; d <= toISOd; d = shiftDate(d, 1)) {
+    if (byDay[d]) cur = val(d);
+    rows.push({ date: d, label: fmtDate(d), value: Math.round(((cur - base) / base) * 10000) / 100 });
+  }
+  const first = byDay[dates[0]], latest = byDay[dates[dates.length - 1]];
+  return { rows, pct: rows[rows.length - 1].value, sessions: dates.length, first, latest, e1rmNow: val(dates[dates.length - 1]), e1rmBest: Math.max(...dates.map(val)), dates };
+}
+
+// Bodyweight lifts (pull-ups, dips, push-ups): if any set was logged at 0 added weight, count your body weight
+// plus whatever you added. With no body weight saved, fall back to counting reps so the numbers still make sense.
+function bodyweightInfo(list, bodyWeight) {
+  const work = list.filter((e) => !e.isWarmup);
+  const isBw = work.some((e) => !(e.weight > 0));
+  if (!isBw) return { list, isBw: false, repsMode: false, hasBw: false };
+  if (bodyWeight > 0) return { list: list.map((e) => ({ ...e, bw: true, added: e.weight || 0, weight: Math.max(5, (e.weight || 0) + bodyWeight) })), isBw: true, repsMode: false, hasBw: true };
+  return { list, isBw: true, repsMode: true, hasBw: false, mixed: work.some((e) => e.weight > 0), assisted: work.some((e) => e.weight < 0) };
+}
+
+// Plates per side for a barbell lift (lbs). Greedy fill from the biggest plate; says so if the weight can't be loaded exactly.
+const PLATES_LB = [45, 35, 25, 10, 5, 2.5];
+const BAR_LB = 45;
+function platesPerSide(totalLbs) {
+  const t = Number(totalLbs);
+  if (!(t > 0)) return null;
+  if (t <= BAR_LB) return { just: true, list: [], total: BAR_LB, exact: t === BAR_LB };
+  let side = (t - BAR_LB) / 2;
+  const list = [];
+  PLATES_LB.forEach((p) => { while (side >= p - 1e-9) { list.push(p); side -= p; } });
+  const loaded = BAR_LB + 2 * list.reduce((a, b) => a + b, 0);
+  return { just: false, list, total: loaded, exact: Math.abs(loaded - t) < 0.01 };
+}
+// Guess whether a lift uses a barbell from its name; the Edit sheet can override it.
+function guessBarbell(name) {
+  const n = String(name || "").toLowerCase();
+  if (/dumbbell|\bdb\b|machine|cable|smith|hammer|leg press|chest press|pec|lat |seated|assist|curl bar ez/.test(n)) return false;
+  return /barbell|bench press|squat|deadlift|overhead press|military press|\bohp\b|bent.?over|pendlay|\brdl\b|romanian|hip thrust|good morning|power clean/.test(n);
+}
+
+// A plain-English read on one exercise, built only from the logged numbers.
+function exSummary(name, series, list, per, W = (v) => v, repsMode = false) {
+  const setLbl = (e) => (e.bw ? (e.added > 0 ? `BW + ${W(e.added)}` : e.added < 0 ? `BW - ${W(-e.added)}` : "BW") : W(e.weight));
+  if (!series) return `Not enough sessions of ${name} in this range yet. Log it a couple more times and a trend shows up here.`;
+  const parts = [`${series.sessions} sessions ${per}.`];
+  if (repsMode) parts.push(`Best set went from ${series.first.reps} to ${series.latest.reps} reps, ${series.pct >= 0 ? "up" : "down"} ${Math.abs(series.pct)}%.`);
+  else parts.push(`Best set went from ${setLbl(series.first)} x ${series.first.reps} to ${setLbl(series.latest)} x ${series.latest.reps}, ${series.pct >= 0 ? "up" : "down"} ${Math.abs(series.pct)}% in estimated 1RM.`);
+  if (series.e1rmNow >= series.e1rmBest) parts.push("The latest session is your best in this range.");
+  else parts.push(`Your best ${repsMode ? "reps in a set in this range were " + series.e1rmBest : "estimated 1RM in this range was " + W(series.e1rmBest)}, so you are ${Math.round(((series.e1rmBest - series.e1rmNow) / series.e1rmBest) * 100)}% under it.`);
+  if (plateauFlag(list.filter((e) => !e.isWarmup))) parts.push("It has held steady for the last 3 sessions.");
+  return parts.join(" ");
+}
+
+
+const KG_PER_LB = 0.45359237;
+const r1 = (n) => Math.round(n * 10) / 10;
+const estE5RM = (weight, reps, bw = false) => Math.round(estE1RM(weight, reps, bw) / (1 + 5 / 30));
+const fmtNum = (n) => Math.round(n).toLocaleString("en-US");
+const defaultTicker = (name) => {
+  // Consonants only, up to 5, spread across the words (Bench Press -> BNCPR).
+  const words = String(name).toUpperCase().replace(/[^A-Z0-9 ]/g, " ").trim().split(/\s+/).filter(Boolean);
+  if (!words.length) return "";
+  const cons = words.map((w) => w.replace(/[AEIOU]/g, "") || w);
+  const n = cons.length, quota = n === 1 ? 5 : n === 2 ? 3 : n === 3 ? 2 : 1;
+  let out = cons.map((c, i) => c.slice(0, i === 0 ? quota : n === 2 ? 2 : Math.min(quota, 2)));
+  let res = out.join("");
+  if (res.length < 5) { // top up from what was left over, in order
+    const rest = cons.map((c, i) => c.slice(out[i].length)).join("");
+    res += rest.slice(0, 5 - res.length);
+  }
+  return res.slice(0, 5);
+};
+// Stats for one exercise. Working sets only. rangeFrom/rangeTo bound the "this range" numbers.
+function exStats(list, fromISO, toISOd, repsMode = false) {
+  const work = list.filter((e) => !e.isWarmup);
+  if (!work.length) return null;
+  const vol = (arr) => arr.reduce((a, e) => a + e.weight * Math.max(e.reps, 0) * (e.sets || 1), 0);
+  const inR = work.filter((e) => e.date >= fromISO && e.date <= toISOd);
+  const best = work.reduce((b, e) => (!b || (repsMode ? e.reps > b.reps : e1(e) > e1(b)) ? e : b), null);
+  const pr = work.reduce((b, e) => (!b || (repsMode ? e.reps > b.reps : e.weight > b.weight) ? e : b), null);
+  const reps = inR.reduce((a, e) => a + Math.max(e.reps, 0) * (e.sets || 1), 0);
+  const sets = inR.reduce((a, e) => a + (e.sets || 1), 0);
+  const dates = [...new Set(inR.map((e) => e.date))];
+  const last = work.reduce((b, e) => (!b || e.date > b.date ? e : b), null);
+  const allDates = [...new Set(work.map((e) => e.date))].sort();
+  return {
+    e1rm: repsMode ? best.reps : e1(best), e5rm: repsMode ? Math.round(inR.reduce((a, e) => a + e.reps, 0) / Math.max(inR.length, 1)) : estE5RM(best.weight, best.reps, !!best.bw),
+    volume: vol(inR), sessions: dates.length, sets, reps,
+    prWeight: repsMode ? pr.reps : pr.weight, prEntry: pr, prDate: pr.date,
+    avgPerRep: reps > 0 ? Math.round(vol(inR) / reps) : 0,
+    lastDate: last.date, lastSet: last,
+    allVolume: vol(work), firstDate: allDates[0], allSessions: allDates.length,
+  };
+}
+
+// iPhone-style row: drag right to reveal Edit, drag left to reveal Delete; a long drag runs the action.
+function SwipeRow({ onEdit, onDelete, children }) {
+  const [dx, setDx] = useState(0);
+  const [dragging, setDragging] = useState(false);
+  const st = useRef(null);
+  const moved = useRef(false);
+  const REVEAL = 88, FULL = 150;
+  const down = (e) => {
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+    if (e.clientX < 20) { st.current = null; return; } // leave the screen edge to the iOS back gesture
+    moved.current = false;
+    st.current = { x: e.clientX, y: e.clientY, mode: null, base: dx };
+  };
+  const move = (e) => {
+    const s0 = st.current;
+    if (!s0) return;
+    const ddx = e.clientX - s0.x, ddy = e.clientY - s0.y;
+    if (!s0.mode) {
+      if (Math.abs(ddx) > 8 && Math.abs(ddx) > Math.abs(ddy)) { s0.mode = "swipe"; moved.current = true; setDragging(true); try { e.currentTarget.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ } }
+      else if (Math.abs(ddy) > 8) { s0.mode = "scroll"; return; }
+      else return;
+    }
+    if (s0.mode === "swipe") setDx(Math.max(-220, Math.min(220, s0.base + ddx)));
+  };
+  const up = () => {
+    const s0 = st.current;
+    st.current = null;
+    if (!s0 || s0.mode !== "swipe") return;
+    setDragging(false);
+    if (dx >= FULL) { setDx(0); onEdit(); }
+    else if (dx <= -FULL) { setDx(0); onDelete(); }
+    else if (dx > 44) setDx(REVEAL);
+    else if (dx < -44) setDx(-REVEAL);
+    else setDx(0);
+  };
+  const cancel = () => { st.current = null; setDragging(false); setDx(0); };
+  return (
+    <div className="swipe-wrap" data-side={dx < 0 ? "l" : dx > 0 ? "r" : ""}>
+      <div className="swipe-actions">
+        <button type="button" className="sw-edit" onClick={() => { setDx(0); onEdit(); }} tabIndex={dx > 0 ? 0 : -1}>Edit</button>
+        <button type="button" className="sw-del" onClick={() => { setDx(0); onDelete(); }} tabIndex={dx < 0 ? 0 : -1}>Delete</button>
+      </div>
+      <div className={"swipe-body" + (dragging ? " dragging" : "")} style={{ transform: `translateX(${dx}px)` }}
+        onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={cancel}
+        onClickCapture={(e) => { if (dx !== 0) { e.stopPropagation(); e.preventDefault(); setDx(0); } }}
+        onClick={(e) => { if (moved.current || dx !== 0 || e.defaultPrevented) return; if (e.target.closest && e.target.closest("button")) return; setDx(-REVEAL); }}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+
+// ---- Dot-matrix numbers and title. A 5 x 7 bitmap font drawn as real dots on a canvas. ----
+const APP_TITLE = "CAPITALGAINS";
+const DOT_FONT = {
+  "0": ["01110","10001","10011","10101","11001","10001","01110"], "1": ["00100","01100","00100","00100","00100","00100","01110"],
+  "2": ["01110","10001","00001","00010","00100","01000","11111"], "3": ["11110","00001","00001","01110","00001","00001","11110"],
+  "4": ["00010","00110","01010","10010","11111","00010","00010"], "5": ["11111","10000","11110","00001","00001","10001","01110"],
+  "6": ["00110","01000","10000","11110","10001","10001","01110"], "7": ["11111","00001","00010","00100","01000","01000","01000"],
+  "8": ["01110","10001","10001","01110","10001","10001","01110"], "9": ["01110","10001","10001","01111","00001","00010","01100"],
+  "+": ["00000","00100","00100","11111","00100","00100","00000"], "-": ["00000","00000","00000","11111","00000","00000","00000"],
+  ".": ["00","00","00","00","00","11","11"], "%": ["11001","11010","00010","00100","01000","01011","10011"], " ": ["000","000","000","000","000","000","000"],
+  "A": ["01110","10001","10001","11111","10001","10001","10001"], "B": ["11110","10001","10001","11110","10001","10001","11110"],
+  "C": ["01110","10001","10000","10000","10000","10001","01110"], "D": ["11110","10001","10001","10001","10001","10001","11110"],
+  "E": ["11111","10000","10000","11110","10000","10000","11111"], "F": ["11111","10000","10000","11110","10000","10000","10000"],
+  "G": ["01110","10001","10000","10111","10001","10001","01111"], "H": ["10001","10001","10001","11111","10001","10001","10001"],
+  "I": ["01110","00100","00100","00100","00100","00100","01110"], "J": ["00111","00010","00010","00010","00010","10010","01100"],
+  "K": ["10001","10010","10100","11000","10100","10010","10001"], "L": ["10000","10000","10000","10000","10000","10000","11111"],
+  "M": ["10001","11011","10101","10101","10001","10001","10001"], "N": ["10001","11001","10101","10011","10001","10001","10001"],
+  "O": ["01110","10001","10001","10001","10001","10001","01110"], "P": ["11110","10001","10001","11110","10000","10000","10000"],
+  "Q": ["01110","10001","10001","10001","10101","10010","01101"], "R": ["11110","10001","10001","11110","10100","10010","10001"],
+  "S": ["01111","10000","10000","01110","00001","00001","11110"], "T": ["11111","00100","00100","00100","00100","00100","00100"],
+  "U": ["10001","10001","10001","10001","10001","10001","01110"], "V": ["10001","10001","10001","10001","10001","01010","00100"],
+  "W": ["10001","10001","10001","10101","10101","10101","01010"], "X": ["10001","10001","01010","00100","01010","10001","10001"],
+  "Y": ["10001","10001","01010","00100","00100","00100","00100"], "Z": ["11111","00001","00010","00100","01000","10000","11111"],
+};
+const dotGlyph = (ch) => DOT_FONT[ch === "−" ? "-" : ch] || DOT_FONT[" "];
+const dotCols = (text) => { let c = 0; String(text).split("").forEach((ch, i) => { c += dotGlyph(ch)[0].length + (i ? 1 : 0); }); return c; };
+const cssColor = (c) => {
+  const m = /^var\((--[a-z-]+)\)$/.exec(c || "");
+  return m && typeof document !== "undefined" ? getComputedStyle(document.documentElement).getPropertyValue(m[1]).trim() || "#fff" : c;
+};
+// Lights the dots left to right when `intro` is set (the one-time start-up animation).
+function DotNum({ text, color, pitch = 6, intro = false, label }) {
+  const ref = useRef(null);
+  const prog = useRef(intro ? 0 : 1);
+  const [, force] = useState(0);
+  const cols = dotCols(text);
+  const draw = () => {
+    const cv = ref.current;
+    if (!cv) return;
+    const dpr = window.devicePixelRatio || 1, W = cols * pitch, H = 7 * pitch;
+    if (cv.width !== Math.round(W * dpr)) { cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); }
+    const ctx = cv.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+    const col = cssColor(color);
+    let cx = 0;
+    String(text).split("").forEach((ch, i) => {
+      if (i) cx += 1;
+      const g = dotGlyph(ch);
+      g.forEach((row, ry) => row.split("").forEach((b, rx) => {
+        const colIdx = cx + rx, on = b === "1";
+        const lit = on && colIdx / cols <= prog.current;
+        ctx.globalAlpha = lit ? 1 : on ? 0.1 : 0.06;
+        ctx.fillStyle = lit ? col : "#888";
+        ctx.beginPath(); ctx.arc(colIdx * pitch + pitch / 2, ry * pitch + pitch / 2, pitch * (lit ? 0.42 : 0.28), 0, Math.PI * 2); ctx.fill();
+      }));
+      cx += g[0].length;
+    });
+    ctx.globalAlpha = 1;
+  };
+  useEffect(() => {
+    if (!intro) return undefined;
+    let raf = 0; const t0 = performance.now() + 300;
+    const step = (now) => { prog.current = Math.min(1, Math.max(0, (now - t0) / 380)); draw(); if (prog.current < 1) raf = requestAnimationFrame(step); else force((x) => x + 1); };
+    raf = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(raf);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  useEffect(draw);
+  return <canvas ref={ref} className="dotnum" role="img" aria-label={label || String(text)} style={{ width: cols * pitch, height: 7 * pitch }} />;
+}
+
+// The app title, pulled down from the top of Overall. Anchored to the bottom, so a small pull shows the
+// bottom of the letters and a full pull shows all of them.
+function DotTitle({ text, height, dragging, progress = 1 }) {
+  const ref = useRef(null);
+  const wrapRef = useRef(null);
+  const shown = useRef(0);
+  const draw = () => {
+    const cv = ref.current, wr = wrapRef.current;
+    if (!cv || !wr) return;
+    const cols = dotCols(text), avail = Math.max(120, wr.clientWidth);
+    const pitch = Math.min(5.6, avail / cols);
+    const dpr = window.devicePixelRatio || 1, W = Math.round(cols * pitch), H = Math.round(7 * pitch);
+    cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+    cv.style.width = `${W}px`; cv.style.height = `${H}px`;
+    const ctx = cv.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = cssColor("var(--text-primary)");
+    const p = shown.current;
+    let cx = 0;
+    text.split("").forEach((ch, i) => {
+      if (i) cx += 1;
+      const g = dotGlyph(ch);
+      g.forEach((row, ry) => row.split("").forEach((b, rx) => {
+        if (b !== "1") return;
+        const gx = cx + rx, hsh = (((gx * 73856093) ^ (ry * 19349663)) >>> 0) % 1000 / 1000;
+        if (hsh >= p) return;
+        ctx.beginPath(); ctx.arc(gx * pitch + pitch / 2, ry * pitch + pitch / 2, pitch * 0.46, 0, Math.PI * 2); ctx.fill();
+      }));
+      cx += g[0].length;
+    });
+  };
+  // Dots light up in a scattered order as the pull deepens; on release they fade back out quickly.
+  useEffect(() => {
+    let raf = 0;
+    const step = () => {
+      const target = Math.max(0, Math.min(1, progress));
+      if (dragging || target > shown.current) shown.current = target;
+      else shown.current += (target - shown.current) * 0.3;
+      if (Math.abs(shown.current - target) < 0.01) shown.current = target;
+      draw();
+      if (shown.current !== target) raf = requestAnimationFrame(step);
+    };
+    step();
+    return () => cancelAnimationFrame(raf);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [progress, dragging]);
+  return (
+    <div ref={wrapRef} className={"title-reveal" + (dragging ? " dragging" : "")} style={{ height }} aria-hidden="true">
+      <canvas ref={ref} />
+    </div>
+  );
+}
+
+// One-time start-up effect: text under `root` is revealed left to right, top to bottom, like typing on an old
+// terminal. It is pure CSS animation (clip-path), staggered by position, so it always finishes on its own and
+// can never leave text hidden.
+let introPlayed = false;
+function typeIn(root, { delay = 260, spread = 420 } = {}) {
+  if (typeof window === "undefined" || !root) return;
+  const sel = ".label-sm,.cap,.index-tag,.tab-l,.ma-readout,.dg-label,.dg-text,.insight-count,.wt-name,.wt-ago,.log-set-row span";
+  const els = Array.from(root.querySelectorAll(sel)).filter((el) => !el.closest("svg,canvas,.carousel,[data-notype]"));
+  if (!els.length) return;
+  const top0 = root.getBoundingClientRect().top, vh = window.innerHeight || 800;
+  els.forEach((el) => {
+    const t = Math.min(1, Math.max(0, (el.getBoundingClientRect().top - top0) / vh));
+    el.style.setProperty("--ty", `${Math.round(delay + t * spread)}ms`);
+  });
+  root.classList.add("intro-typing");
+  setTimeout(() => { root.classList.remove("intro-typing"); els.forEach((el) => el.style.removeProperty("--ty")); }, delay + spread + 900);
+}
+
+// A static (i) in the lower left corner of a card. Tap it to show or hide the description beside it.
+function InfoFoot({ title, info, right }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="info-foot">
+      <button type="button" className="info-dot" aria-label={`About ${title}`} aria-expanded={open} onClick={() => setOpen((o) => !o)}>i</button>
+      {open && <div className="axis-caption info-body">{info}</div>}
+      {right}
+    </div>
+  );
+}
+
+function CardHead({ title, children }) {
+  return (
+    <div className="card-head">
+      <div className="card-head-row">
+        <div className="label-sm" style={{ textAlign: "center", marginBottom: 0 }}>{title}</div>
+      </div>
+      {children}
+    </div>
+  );
+}
+
+// ---- Social feed ----------------------------------------------------------------------------------
+// The filtering rules live in lib/feedFilter.js and the data comes from a source object. Today that is
+// lib/mockSocial.js (invented sample people, labelled "Sample"); swap in real account and social-graph data later.
+function PersonIcon({ x, r = 3.2 }) {
+  return <g><circle cx={x} cy="8" r={r} /><path d={`M${x - 5} 19 a5 5 0 0 1 10 0`} /></g>;
+}
+const FEED_ICONS = {
+  friends: <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" aria-hidden="true"><PersonIcon x={8} /><PersonIcon x={16} /></svg>,
+  fof: <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" aria-hidden="true"><PersonIcon x={5} r={2.6} /><PersonIcon x={12} r={2.6} /><PersonIcon x={19} r={2.6} /></svg>,
+};
+const FEED_MODE_LABEL = { friends: "Friends only", fof: "Friends of friends" };
+const DEGREE_LABEL = (it) => (it.source === "recommendation" ? "Suggested" : it.degree === 1 ? "Friend" : it.degree === 2 ? "Friend of friend" : "3rd degree");
+function agoText(ts) {
+  const h = Math.max(1, Math.round((Date.now() - ts) / 3600000));
+  return h < 24 ? `${h}h` : `${Math.round(h / 24)}d`;
+}
+
+function DotCamera({ size = 4, color = "currentColor" }) {
+  const map = ["...###.....", "###########", "##.......##", "##..###..##", "##..#.#..##", "##..###..##", "##.......##", "###########"];
+  return (
+    <svg width={11 * size} height={8 * size} viewBox={`0 0 ${11 * size} ${8 * size}`} aria-hidden="true" fill={color}>
+      {map.flatMap((row, y) => row.split("").map((c, x) => (c === "#" ? <circle key={`${x}-${y}`} cx={x * size + size / 2} cy={y * size + size / 2} r={size * 0.38} /> : null)))}
+    </svg>
+  );
+}
+
+function DotNotebook({ size = 3, color = "currentColor" }) {
+  const map = [".####.####.", "#....#....#", "#.##.#.##.#", "#....#....#", "#.#.##.#..#", "#....#....#", "#.##.#.###.", ".####.####."];
+  return (
+    <svg width={11 * size} height={8 * size} viewBox={`0 0 ${11 * size} ${8 * size}`} aria-hidden="true" fill={color}>
+      {map.flatMap((row, y) => row.split("").map((c, x) => (c === "#" ? <circle key={`${x}-${y}`} cx={x * size + size / 2} cy={y * size + size / 2} r={size * 0.38} /> : null)))}
+    </svg>
+  );
+}
+const HEART_ON = [".##...##.", "####.####", "#########", "#########", ".#######.", "..#####..", "...###...", "....#...."];
+const HEART_OFF = [".##...##.", "#..#.#..#", "#...#...#", "#.......#", ".#.....#.", "..#...#..", "...#.#...", "....#...."];
+function DotHeart({ on, size = 3 }) {
+  const map = on ? HEART_ON : HEART_OFF;
+  return (
+    <svg width={9 * size} height={8 * size} viewBox={`0 0 ${9 * size} ${8 * size}`} aria-hidden="true" fill="currentColor">
+      {map.flatMap((row, y) => row.split("").map((c, x) => (c === "#" ? <circle key={`${x}-${y}`} cx={x * size + size / 2} cy={y * size + size / 2} r={size * 0.4} /> : null)))}
+    </svg>
+  );
+}
+const likeSeed = (id) => 3 + ([...String(id)].reduce((a, c) => (a * 31 + c.charCodeAt(0)) >>> 0, 7) % 38);
+const EMBLEM = { PR: "PR", Streak: "STREAK", Growth: "GROWTH", Volume: "VOLUME" };
+
+function FeedPage({ source = mockSocial }) {
+  const [mode, setMode] = useState(FEED_MODES.DISCOVERY); // null = Community Discovery (default)
+  const [liked, setLiked] = useState({});
+    const toggle = (m) => setMode((cur) => (cur === m ? FEED_MODES.DISCOVERY : m));
+  const items = useMemo(() => filterFeed({ ...source, mode }), [source, mode]);
+  const heading = mode === "friends" ? "Friends only" : mode === "fof" ? "Friends of friends" : "Community";
+  return (
+    <div className="feedpage" role="region" aria-label="Feed">
+      <div className="fp-head">
+        <div>
+          <h1 className="fp-title">Feed</h1>
+          <div className="cap">{heading} · sample data</div>
+        </div>
+        <span className="feed-toggles" role="group" aria-label="Feed audience">
+          {["friends", "fof"].map((m) => (
+            <button key={m} type="button" className={"feed-toggle" + (mode === m ? " on" : "")} aria-pressed={mode === m} aria-label={FEED_MODE_LABEL[m]} onClick={() => toggle(m)}>{FEED_ICONS[m]}</button>
+          ))}
+        </span>
+      </div>
+      {items.length === 0 && <div className="cap" style={{ padding: "var(--s-5) 0" }}>Nothing to show in this view yet.</div>}
+      {items.map((it) => {
+        const u = source.users[it.authorId] || {};
+        const nm = String(u.name || "Someone"), initial = nm.replace(/^Sample\s+/, "").charAt(0).toUpperCase();
+        const n = likeSeed(it.id) + (liked[it.id] ? 1 : 0);
+        return (
+          <div key={it.id} className="fp-card">
+            <div className="fp-row">
+              <div className="fp-main">
+                <div className="fp-who">
+                  <span className="fp-avatar" aria-hidden="true">{initial}</span>
+                  <span>
+                    <span className="fp-name">{nm}{u.isMock && <span className="feed-mock">sample</span>}</span>
+                    <span className="fp-sub">{DEGREE_LABEL(it)} · {agoText(it.ts)}</span>
+                  </span>
+                </div>
+                <div className="fp-text">{it.text}</div>
+              </div>
+              <div className="fp-emblem" aria-hidden="true"><DotNum text={EMBLEM[it.achievement] || String(it.achievement || "").toUpperCase().slice(0, 6)} color="var(--gain)" pitch={3} /></div>
+            </div>
+            <button type="button" className={"fp-like" + (liked[it.id] ? " on" : "")} aria-pressed={!!liked[it.id]} onClick={() => setLiked((l) => ({ ...l, [it.id]: !l[it.id] }))}>
+              <DotHeart on={!!liked[it.id]} size={3} />
+              <span>{n}</span>
+            </button>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function SvgChart({ rows, series, mode, metric, unit = "lbs" }) {
   const [activeIdx, setActiveIdx] = useState(null);
   const svgRef = useRef(null);
-  const draggingRef = useRef(false);
-  const W = 340, H = 210, padL = 34, padR = 8, padT = 10, padB = 24;
+  const W = 340, H = 210, padL = 38, padR = 14, padT = 10, padB = 24;
   const allVals = [];
   rows.forEach((r) => series.forEach((s) => { if (r[s] !== undefined) allVals.push(r[s]); }));
-  if (!allVals.length) return <div className="empty">No data</div>;
-  const min = Math.min(...allVals) - 5, max = Math.max(...allVals) + 5;
   const n = rows.length;
-  const x = (i) => padL + (n <= 1 ? 0 : (i / (n - 1)) * (W - padL - padR));
+  // Points sit where their dates fall, not evenly by session, so a long gap looks like a long gap.
+  const day = (r) => new Date(r.date + "T00:00:00").getTime() / 86400000;
+  const t0 = n ? day(rows[0]) : 0, t1 = n ? day(rows[n - 1]) : 0, span = t1 - t0;
+  const x = (i) => padL + (span === 0 ? (W - padL - padR) / 2 : ((day(rows[i]) - t0) / span) * (W - padL - padR));
+  const hasData = allVals.length > 0;
+  const min = hasData ? Math.min(...allVals) - 5 : 0, max = hasData ? Math.max(...allVals) + 5 : 1;
   const y = (v) => padT + (1 - (v - min) / (max - min)) * (H - padT - padB);
-  const xTickEvery = Math.max(1, Math.ceil(n / 5));
 
-  const posToIndex = (clientX) => {
+  const getIndex = (clientX) => {
     const svg = svgRef.current;
-    if (!svg) return null;
+    if (!svg || !n) return null;
     const rect = svg.getBoundingClientRect();
     const relX = ((clientX - rect.left) / rect.width) * W;
     let nearest = 0, minDist = Infinity;
     rows.forEach((r, i) => { const d = Math.abs(x(i) - relX); if (d < minDist) { minDist = d; nearest = i; } });
     return nearest;
   };
-  const scrubTo = (clientX) => { const idx = posToIndex(clientX); if (idx !== null) setActiveIdx(idx); };
-  const startScrub = (e) => { draggingRef.current = true; scrubTo(e.clientX); };
-  const moveScrub = (e) => { if (draggingRef.current) scrubTo(e.clientX); };
-  const endScrub = () => { draggingRef.current = false; };
+  const handlers = useHoldScrub(getIndex, setActiveIdx, svgRef);
 
-  const activeRow = activeIdx !== null ? rows[activeIdx] : null;
+  if (!hasData) return <div className="empty">No data</div>;
+  // One line = green if it ended above where it started, red if below. Several lines keep their own colors.
+  const _vals0 = rows.filter((r) => r[series[0]] !== undefined).map((r) => r[series[0]]);
+  const trendColor = _vals0.length > 1 && _vals0[_vals0.length - 1] < _vals0[0] ? "var(--loss)" : "var(--gain)";
+  const colorOf = (si) => (series.length === 1 ? trendColor : LINE_COLORS[si % LINE_COLORS.length]);
+
+  const activeRow = activeIdx !== null && rows[activeIdx] ? rows[activeIdx] : null;
   const activeLines = activeRow
-    ? series.filter((s) => activeRow[s] !== undefined).map((s, si) => {
+    ? series.filter((s) => activeRow[s] !== undefined).map((s) => {
         const colorIdx = series.indexOf(s);
         const detail = mode === "workout" ? (activeRow[`${s}__detail`] || []) : null;
         const suffix = mode === "exercise"
-          ? `${activeRow[s]}${metric === "e1rm" ? " e1RM" : " lbs"}${activeRow[`${s}__r`] ? ` · ${activeRow[`${s}__r`]} reps${activeRow[`${s}__s`] > 1 ? ` × ${activeRow[`${s}__s`]}` : ""}` : ""}`
-          : `${activeRow[s]}${metric === "e1rm" ? " e1RM" : " lbs"}`;
-        return { series: s, color: LINE_COLORS[colorIdx % LINE_COLORS.length], text: `${s}: ${suffix}`, detail };
+          ? `${activeRow[s]}${metric === "e1rm" ? " est. max" : ` ${unit}`}${activeRow[`${s}__r`] ? ` · ${activeRow[`${s}__r`]} reps${activeRow[`${s}__s`] > 1 ? ` × ${activeRow[`${s}__s`]}` : ""}` : ""}`
+          : `${activeRow[s]}${metric === "e1rm" ? " est. max" : ` ${unit}`}`;
+        return { series: s, color: colorOf(colorIdx), text: `${s}: ${suffix}`, detail };
       })
     : [];
 
-  const boxW = 170, lineH = 12;
+  const boxW = 212, lineH = 15; // Apple HIG: text no smaller than 11 pt
   const boxLineCount = activeLines.reduce((n2, l) => n2 + 1 + (l.detail ? l.detail.length : 0), 0);
-  const boxH = activeRow ? 20 + boxLineCount * lineH : 0;
-  let boxX = activeRow ? Math.min(Math.max(x(activeIdx) - boxW / 2, 2), W - boxW - 2) : 0;
-  let boxY = activeRow ? Math.max(padT + 2, 10) : 0;
+  const boxH = activeRow ? 22 + boxLineCount * lineH : 0;
+  const boxX = activeRow ? Math.min(Math.max(x(activeIdx) - boxW / 2, 2), W - boxW - 2) : 0;
+  const boxY = activeRow ? Math.max(padT + 2, 10) : 0;
+
+  // Four evenly spaced date labels along the time axis; the outer two are anchored inward so they
+  // can't run into each other or off the edge.
+  const ticks = span === 0
+    ? [{ pos: 0.5, date: rows[0].date, anchor: "middle" }]
+    : [0, 1, 2, 3].map((k) => ({ pos: k / 3, date: toISO(new Date((t0 + (span * k) / 3) * 86400000 + 12 * 3600000)), anchor: k === 0 ? "start" : k === 3 ? "end" : "middle" }));
 
   return (
     <svg
       ref={svgRef}
       viewBox={`0 0 ${W} ${H}`}
-      style={{ width: "100%", height: 230, touchAction: "none", cursor: "crosshair" }}
-      onPointerDown={startScrub}
-      onPointerMove={moveScrub}
-      onPointerUp={endScrub}
-      onPointerLeave={endScrub}
+      style={{ width: "100%", height: 230, touchAction: "pan-y", cursor: "crosshair", ...NO_SELECT }}
+      onContextMenu={(e) => e.preventDefault()}
+      {...handlers}
     >
+      <defs>
+        <pattern id="dotsGain" width="4" height="4" patternUnits="userSpaceOnUse"><circle cx="2" cy="2" r="1" fill="var(--gain)" fillOpacity="0.75" /></pattern>
+        <pattern id="dotsLoss" width="4" height="4" patternUnits="userSpaceOnUse"><circle cx="2" cy="2" r="1" fill="var(--loss)" fillOpacity="0.75" /></pattern>
+      </defs>
       <rect data-bg="1" x="0" y="0" width={W} height={H} fill="transparent" />
       {[0, 0.25, 0.5, 0.75, 1].map((t, i) => {
         const yy = padT + t * (H - padT - padB);
         const val = Math.round(max - t * (max - min));
-        return <g key={i}><line x1={padL} y1={yy} x2={W - padR} y2={yy} stroke="var(--border)" strokeWidth="1" /><text x={2} y={yy + 3} fontSize="9" fill="var(--mute)">{val}</text></g>;
+        return <g key={i}><line x1={padL} y1={yy} x2={W - padR} y2={yy} stroke="var(--border)" strokeWidth="1" /><text x={2} y={yy + 4} fontSize="11" fill="var(--text-secondary)">{val}</text></g>;
       })}
       {series.map((s, si) => {
         const pts = [];
         rows.forEach((r, i) => { if (r[s] !== undefined) pts.push(`${x(i)},${y(r[s])}`); });
-        return <polyline key={s} points={pts.join(" ")} fill="none" stroke={LINE_COLORS[si % LINE_COLORS.length]} strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" />;
+        return <g key={s}>
+          {series.length === 1 && pts.length > 1 && <AreaDots pts={pts} baseY={H - padB} color={trendColor === "var(--loss)" ? "var(--loss)" : "var(--gain)"} />}
+          <polyline points={pts.join(" ")} fill="none" stroke={colorOf(si)} strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" />
+        </g>;
       })}
-      {rows.map((r, i) => (i % xTickEvery === 0 || i === n - 1) && <text key={i} x={x(i)} y={H - 6} fontSize="9" fill="var(--mute)" textAnchor="middle">{r.label}</text>)}
+      {n <= 24 && series.map((s, si) => rows.map((r, i) => r[s] !== undefined && <circle key={`${s}-${i}`} cx={x(i)} cy={y(r[s])} r="2.4" fill={colorOf(si)} />))}
+      {ticks.map((tk, i) => <text key={i} x={padL + tk.pos * (W - padL - padR)} y={H - 6} fontSize="11" fill="var(--text-secondary)" textAnchor={tk.anchor}>{fmtDate(tk.date)}</text>)}
 
       {activeRow && (
         <g>
-          <line x1={x(activeIdx)} y1={padT} x2={x(activeIdx)} y2={H - padB} stroke="var(--mute)" strokeWidth="1" strokeDasharray="3,3" opacity="0.6" />
+          <line x1={x(activeIdx)} y1={padT} x2={x(activeIdx)} y2={H - padB} stroke="var(--text-secondary)" strokeWidth="1" strokeDasharray="3,3" opacity="0.6" />
           {activeLines.map((l) => (
             <circle key={l.series} cx={x(activeIdx)} cy={y(activeRow[l.series])} r={5} fill={l.color} stroke={INK} strokeWidth="1.5" />
           ))}
           <rect x={boxX} y={boxY} width={boxW} height={boxH} rx="8" fill={CARD_INK} stroke="var(--border)" />
-          <text x={boxX + 8} y={boxY + 14} fontSize="9" fontWeight="700" fill="var(--mute)">{activeRow.label}</text>
+          <text x={boxX + 8} y={boxY + 15} fontSize="11" fontWeight="700" fill="var(--text-secondary)">{activeRow.label}</text>
           {(() => {
             let lineIdx = 0;
             return activeLines.map((l) => {
               const rowsOut = [];
               rowsOut.push(<text key={`${l.series}-h`} x={boxX + 8} y={boxY + 14 + (++lineIdx) * lineH} fontSize="10" fontWeight="700" fill={l.color}>{l.text}</text>);
               if (l.detail) l.detail.forEach((d, di) => {
-                rowsOut.push(<text key={`${l.series}-d${di}`} x={boxX + 14} y={boxY + 14 + (++lineIdx) * lineH} fontSize="9" fontWeight="500" fill="var(--chalk)">{d.exercise}: {d.weight} lbs × {d.reps}{d.sets > 1 ? ` × ${d.sets}` : ""}</text>);
+                rowsOut.push(<text key={`${l.series}-d${di}`} x={boxX + 14} y={boxY + 14 + (++lineIdx) * lineH} fontSize="11" fontWeight="500" fill="var(--text-primary)">{d.exercise}: {d.weight} lbs × {d.reps}{d.sets > 1 ? ` × ${d.sets}` : ""}</text>);
               });
               return rowsOut;
             });
@@ -161,309 +703,589 @@ function SvgChart({ rows, series, mode, metric }) {
   );
 }
 
-const PCT_TABLE = [
-  { pct: 1.00, reps: 1 }, { pct: 0.95, reps: 2 }, { pct: 0.93, reps: 3 }, { pct: 0.90, reps: 4 },
-  { pct: 0.87, reps: 5 }, { pct: 0.85, reps: 6 }, { pct: 0.80, reps: 8 }, { pct: 0.77, reps: 9 }, { pct: 0.75, reps: 10 },
-];
-function repsForPct(pct) {
-  if (pct >= 1) return 1;
-  if (pct <= 0.75) return 10;
-  for (let i = 0; i < PCT_TABLE.length - 1; i++) {
-    const a = PCT_TABLE[i], b = PCT_TABLE[i + 1];
-    if (pct <= a.pct && pct >= b.pct) {
-      const t = (a.pct - pct) / (a.pct - b.pct);
-      return Math.round(a.reps + t * (b.reps - a.reps));
-    }
-  }
-  return 8;
-}
 const roundTo5 = (v) => Math.round(v / 5) * 5;
 
+const REC_LOW = 8, REC_HIGH = 12;
+const BEST_REPS_WINDOW_DAYS = 56; // "best reps at this weight" looks back about 8 weeks
+const PLATEAU_SETS_NEEDED = 4;    // sets of REC_LOW+ reps at the top weight, across the last 3 sessions
+
+// Estimated strength (weight and reps together) has stayed within 3% across the last 3 sessions.
 function plateauFlag(history) {
-  const distinctDates = [...new Set(history.map((e) => e.date))];
+  const distinctDates = [...new Set(history.map((e) => e.date))].sort().reverse();
   if (distinctDates.length < 3) return false;
-  // Percent-based on estimated 1RM (weight + reps together), not a literal same-plates check —
-  // catches the case where the weight never moved but reps have been quietly sliding too.
-  const recentE1rms = distinctDates.slice(0, 3).map((d) => {
-    const top = history.filter((e) => e.date === d).reduce((best, e) => (e.weight > best.weight ? e : best));
-    return estE1RM(top.weight, top.reps);
+  const recent = distinctDates.slice(0, 3).map((d) => {
+    const top = history.filter((e) => e.date === d).reduce((best, e) => pickBest(best, e), null);
+    return e1(top);
   });
-  const maxE = Math.max(...recentE1rms), minE = Math.min(...recentE1rms);
+  const maxE = Math.max(...recent), minE = Math.min(...recent);
   if (!maxE) return false;
   return (maxE - minE) / maxE <= 0.03;
 }
 
-// Prefer the last ~60 days of working-set data when there's enough of it, so a hot streak (or a
-// slump) isn't dragged down by months-old numbers. Falls back to full history when recent data is sparse.
-function pickWorkingBasis(hist) {
-  const workingSetHist = hist.filter((e) => e.reps >= 5).sort((a, b) => (a.date < b.date ? 1 : -1));
-  if (workingSetHist.length === 0) return { pool: [], recencyLimited: false };
-  const cutoff = shiftDate(todayISO(), -60);
-  const recent = workingSetHist.filter((e) => e.date >= cutoff);
-  if (recent.length >= 2) return { pool: recent, recencyLimited: true };
-  return { pool: workingSetHist, recencyLimited: false };
-}
+// Works out what to do next time from the logged history (prior sessions only).
+//  - Weight goes up when the top set hit 12+ reps, or when strength has been flat for 3 sessions
+//    AND at least 4 sets at the top weight had 8+ reps across those sessions (if fewer than 4 sets
+//    were logged there, every one of them needs 8+). Otherwise the weight is held.
+//  - Held weight gets a rep target built from your BEST reps at that weight in the last ~8 weeks,
+//    not just last session, so one off day doesn't lower the bar: from that best up to about +20%.
+//  - "reps" mode never raises the weight.
+function planNext(hist, mode, todayIso) {
+  const ws = hist.filter((e) => e.reps >= 5).sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
+  if (!ws.length) return null;
+  const lastSessionDate = ws[0].date;
+  const lastSession = ws.filter((e) => e.date === lastSessionDate).sort((a, b) => b.weight - a.weight || b.reps - a.reps);
+  const lastTop = lastSession[0];
+  const topW = lastTop.weight;
 
-const REC_LOW = 8, REC_HIGH = 12;
-function quickRecommend(hist, mode = "weight") {
-  if (!hist || !hist.length) return null;
-  const { pool } = pickWorkingBasis(hist);
-  if (pool.length > 0) {
-    const lastSessionDate = pool[0].date;
-    const lastSession = pool.filter((e) => e.date === lastSessionDate).sort((a, b) => b.weight - a.weight);
-    const lastTop = lastSession[0];
+  const cutoff = shiftDate(todayIso, -BEST_REPS_WINDOW_DAYS);
+  const recentAtWeight = ws.filter((e) => e.weight === topW && e.date >= cutoff);
+  const bestReps = recentAtWeight.length ? Math.max(...recentAtWeight.map((e) => e.reps)) : lastTop.reps;
+
+  const dates = [...new Set(ws.map((e) => e.date))]; // newest first
+  const last3 = dates.slice(0, 3);
+  const setsAt = ws.filter((e) => last3.includes(e.date) && e.weight === topW);
+  const totalSets = setsAt.reduce((s, e) => s + (e.sets || 1), 0);
+  const qualSets = setsAt.filter((e) => e.reps >= REC_LOW).reduce((s, e) => s + (e.sets || 1), 0);
+  const enoughRepsAtWeight = totalSets >= PLATEAU_SETS_NEEDED ? qualSets >= PLATEAU_SETS_NEEDED : totalSets > 0 && qualSets === totalSets;
+
+  let streak = 0;
+  for (const d of dates) {
+    const dayTop = ws.filter((e) => e.date === d).reduce((m, e) => Math.max(m, e.weight), -Infinity);
+    if (dayTop === topW) streak++; else break;
+  }
+
+  const plateaued = plateauFlag(ws);
+  const bumpSize = topW >= 100 ? 10 : 5;
+  const tw = topW < 0 ? `BW - ${-topW} lbs` : topW === 0 ? "BW" : `${topW}`; // how the top weight reads in notes
+  let nextTopWeight = topW, low, high, note, bumped = false;
+
+  if (mode !== "reps" && lastTop.reps >= REC_HIGH) {
+    bumped = true;
+    note = `You hit ${lastTop.reps} reps last time (top of the ${REC_LOW}–${REC_HIGH} range). ${topW < 0 ? "Cutting the assist by" : "Adding"} ${bumpSize} lbs; reps reset to ${REC_LOW}–${REC_HIGH}.`;
+  } else if (mode !== "reps" && plateaued && enoughRepsAtWeight) {
+    bumped = true;
+    note = `Strength has been flat for 3 sessions and you've done ${REC_LOW}+ reps on ${totalSets >= PLATEAU_SETS_NEEDED ? `${PLATEAU_SETS_NEEDED}+ sets` : "every set"} at ${tw}. ${topW < 0 ? "Cutting the assist by" : "Adding"} ${bumpSize} lbs; reps reset to ${REC_LOW}–${REC_HIGH}.`;
+  }
+
+  if (bumped) {
+    nextTopWeight = topW + bumpSize; low = REC_LOW; high = REC_HIGH;
+  } else {
+    low = bestReps;
+    high = Math.max(low + 1, Math.round(low * 1.2));
+    if (mode !== "reps") { high = Math.min(high, REC_HIGH); low = Math.min(low, high); }
+    const target = low === high ? `${low}` : `${low}–${high}`;
+    const lastBit = lastTop.reps < bestReps ? ` (last time ${lastTop.reps})` : "";
     if (mode === "reps") {
-      // Hold the weight steady on purpose — the goal is climbing reps over time, not adding weight.
-      const recWeight = lastTop.weight;
-      const recReps = lastTop.reps + 1;
-      return { lastWeight: lastTop.weight, lastReps: lastTop.reps, recWeight, recReps, onlyMax: false, mode };
+      note = `Weight is held on purpose. Your best at ${tw} in the last 8 weeks is ${bestReps} reps${lastBit}. Aim for ${target}.`;
+    } else if (plateaued) {
+      note = `Strength has been flat for 3 sessions, but you haven't had ${PLATEAU_SETS_NEEDED} sets of ${REC_LOW}+ reps at ${tw} yet, so no weight increase. Your best in the last 8 weeks is ${bestReps} reps${lastBit}. Aim for ${target}.`;
+    } else {
+      note = `Your best at ${tw} in the last 8 weeks is ${bestReps} reps${lastBit}. Same weight: aim for ${target}.`;
     }
-    const plateaued = plateauFlag(pool);
-    const shouldBump = lastTop.reps >= REC_HIGH || plateaued;
-    const recWeight = shouldBump ? lastTop.weight + (lastTop.weight >= 100 ? 10 : 5) : lastTop.weight;
-    const recReps = shouldBump ? REC_LOW : Math.min(REC_HIGH, lastTop.reps + 1);
-    return { lastWeight: lastTop.weight, lastReps: lastTop.reps, recWeight, recReps, onlyMax: false, mode };
+    if (streak >= 6) note += ` Same weight for ${streak} sessions in a row: consider a lighter week or a variation.`;
   }
-  const bestEntry = hist.reduce((best, e) => (estE1RM(e.weight, e.reps) > estE1RM(best.weight, best.reps) ? e : best), hist[0]);
-  const e1rm = estE1RM(bestEntry.weight, bestEntry.reps);
-  const recWeight = roundTo5(e1rm / (1 + REC_LOW / 30));
-  return { lastWeight: bestEntry.weight, lastReps: bestEntry.reps, recWeight, recReps: REC_LOW, onlyMax: true, mode };
-}
 
-
-// ---------------------------------------------------------------------------
-// Sample data for the demo. Nothing here is real: a seeded generator (so every visitor sees the
-// same history) that builds five years of lifting relative to today. The arc it follows:
-//   weeks   0-13   beginner gains (fast, then slowing)
-//   weeks  13-35   plateau
-//   weeks  35-70   breakthrough: a second climb
-//   weeks  70-110  stagnation (and attendance slipping)
-//   weeks 110-124  decline (life, injury, burnout)  -> a 3-week layoff
-//   weeks 127-260  rebuilding, then a gradual climb to a new high
-// A few present-day stories are baked into the last weeks so the insights have something to say.
-// ---------------------------------------------------------------------------
-const DEMO_KEY = "hooksWorkoutDemoV2";
-function mulberry32(seed) {
-  let a = seed;
-  return function () {
-    a |= 0; a = (a + 0x6d2b79f5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-function buildDemoData() {
-  const rnd = mulberry32(20260927);
-  const TOTAL_WEEKS = 260, TOTAL_DAYS = TOTAL_WEEKS * 7;
-
-  // How strong a typical lift is versus day one, by week: [from, to, levelAtFrom, levelAtTo, easing]
-  const CURVE = [
-    [0, 13, 1.00, 1.55, "out"],     // beginner gains
-    [13, 35, 1.55, 1.58, "lin"],    // plateau
-    [35, 70, 1.58, 1.92, "inout"],  // breakthrough
-    [70, 110, 1.92, 1.95, "lin"],   // stagnation
-    [110, 124, 1.95, 1.48, "inout"],// decline
-    [124, 127, 1.48, 1.48, "lin"],  // layoff
-    [127, 150, 1.48, 1.80, "out"],  // rebuilding (muscle memory)
-    [150, 260, 1.80, 2.10, "soft"], // gradual climb
-  ];
-  const EASE = { lin: (u) => u, out: (u) => 1 - (1 - u) * (1 - u), inout: (u) => u * u * (3 - 2 * u), soft: (u) => 0.35 * (1 - (1 - u) * (1 - u)) + 0.65 * u };
-  const levelAt = (t) => {
-    const seg = CURVE.find((c) => t >= c[0] && t <= c[1]) || CURVE[CURVE.length - 1];
-    const u = Math.min(1, Math.max(0, (t - seg[0]) / (seg[1] - seg[0])));
-    const base = seg[2] + (seg[3] - seg[2]) * EASE[seg[4]](u);
-    const wobble = t >= 70 && t < 110 ? 0.018 : t >= 13 && t < 35 ? 0.012 : 0.006;
-    return base * (1 + wobble * Math.sin(t * 0.85));
-  };
-
-  // Chance a scheduled session gets skipped (0 = never), by week
-  const skipChance = (t) => t < 13 ? 0.05 : t < 35 ? 0.14 : t < 70 ? 0.08 : t < 110 ? 0.30 : t < 124 ? 0.50 : t < 127 ? 1 : t < 140 ? 0.35 : t < 200 ? 0.15 : 0.10;
-  // How many of a workout's six exercises get done, by week (volume dips when life gets in the way)
-  const exercisesDone = (t) => t < 13 ? 5 : t < 70 ? 6 : t < 110 ? 5 : t < 140 ? 5 : 6;
-
-  // [exercise, beginner starting weight, how fully the lift follows the curve, special behaviour]
-  const PLAN = {
-    push: { dow: 1, list: [["Bench Press", 95, 1.0, "pr"], ["Incline Barbell Press", 75, 0.95], ["Barbell Shoulder Press", 55, 0.9], ["Fly Machine", 60, 0.8], ["Cable Lateral Raise", 10, 0.7], ["Decline Press / Dips", 20, 1.1]] },
-    pull: { dow: 2, list: [["Deadlift", 135, 1.2], ["Barbell Rows", 95, 1.0, "flat"], ["Close-Grip Lat Pulldown", 80, 0.9], ["Seated Cable Rows (V-Bar)", 80, 0.9], ["Face Pulls", 25, 0.8], ["Hex Bar Shrugs", 135, 1.1]] },
-    legsA: { dow: 4, list: [["Squats", 115, 1.15], ["Leg Press", 180, 1.3], ["Leg Curls", 60, 0.4, "dip"], ["Calf Raises", 90, 0.9], ["Romanian Deadlift", 115, 1.1], ["Leg Extensions", 70, 0.8]] },
-    arms: { dow: 6, list: [["Barbell Curl", 45, 0.8], ["Hammer Curl", 20, 0.7], ["Skull Crushers", 35, 0.9], ["Rope Pushdown Dropset", 35, 0.9], ["Preacher Curls (BB)", 40, 0.8], ["OH Tricep Extensions", 25, 0.8]] },
-  };
-  const roundLoad = (w) => (w >= 50 ? Math.round(w / 5) * 5 : Math.round(w / 2.5) * 2.5);
-  const lift = (start, follow, t) => start * (1 + follow * (levelAt(t) - 1));
-
-  const entries = [];
-  let n = 0;
-  for (let daysAgo = TOTAL_DAYS; daysAgo >= 1; daysAgo--) {
-    const date = shiftDate(todayISO(), -daysAgo);
-    const t = (TOTAL_DAYS - daysAgo) / 7;
-    const fromEnd = TOTAL_WEEKS - t;
-    Object.keys(PLAN).forEach((workoutId) => {
-      const { dow, list } = PLAN[workoutId];
-      if (daysAgo % 7 !== dow) return;
-      if (rnd() < skipChance(t)) return;               // a missed session
-      if (workoutId === "arms" && daysAgo < 8) return;  // arms has gone untrained lately
-      list.slice(0, exercisesDone(t)).forEach(([exercise, start, follow, mode], idx) => {
-        let load = lift(start, follow, t) * (1 + (rnd() - 0.5) * 0.04);
-        let reps = 8 + Math.floor(rnd() * 5);
-        if (mode === "pr") reps = 8 + (reps % 2); // 8-9 reps, so an old high-rep day can't outrank the record
-        if (mode === "flat" && fromEnd <= 9) { load = lift(start, follow, TOTAL_WEEKS - 9); reps = 10; }
-        if (mode === "dip" && fromEnd <= 10) load *= 1 - 0.011 * (10 - fromEnd);
-        let weight = roundLoad(load);
-        if (mode === "pr" && daysAgo <= 21) weight = roundLoad(lift(start, follow, TOTAL_WEEKS)); // steady lately...
-        if (mode === "pr" && daysAgo === 15) { weight += 5; reps = 9; }                            // ...one record day, 3 weeks back
-        if (mode === "pr" && daysAgo <= 2) reps = 9;
-        if (idx === 0) {
-          entries.push({ id: `demo-w-${n++}`, exercise, workoutId, weight: roundLoad(weight * 0.55), sets: 1, reps: 10, date, isWarmup: true });
-        }
-        entries.push({ id: `demo-${n++}`, exercise, workoutId, weight, sets: 3, reps, date, isWarmup: false });
-      });
-    });
-  }
-  entries.sort((x, y) => (x.date < y.date ? 1 : x.date > y.date ? -1 : 0));
+  // Set-by-set weights follow how you actually spread them last session (3 x 225 stays 225 across
+  // the board; a pyramid stays a pyramid). A single logged set falls back to a standard pyramid.
+  const expanded = [];
+  lastSession.forEach((e) => { for (let i = 0; i < Math.max(1, e.sets || 1); i++) expanded.push(e.weight); });
+  const sessionSetsAtTop = lastSession.filter((e) => e.weight === topW).reduce((s, e) => s + (e.sets || 1), 0);
   return {
-    workouts: JSON.parse(JSON.stringify(DEFAULT_WORKOUTS)),
-    exercises: JSON.parse(JSON.stringify(DEFAULT_EXERCISES)),
-    entries,
-    restDays: [3, 10, 17].map((d) => shiftDate(todayISO(), -d)),
-    progressionMode: "weight",
+    lastTop, lastSessionDate, lastSession, nextTopWeight, repLow: low, repHigh: high, note, bumped, bestReps,
+    basedOnActualSets: expanded.length >= 2, setWeights: expanded.sort((a, b) => b - a),
+    defaultSets: Math.min(8, Math.max(1, sessionSetsAtTop)),
   };
 }
 
-function Sparkline({ points, color }) {
-  if (points.length < 2) return null;
-  const vals = points.map((p) => p.e1rm);
-  const min = Math.min(...vals), max = Math.max(...vals);
-  const range = max - min || 1;
-  const w = 72, h = 26;
-  const coords = points.map((p, i) => {
-    const x = (i / (points.length - 1)) * w;
-    const y = h - ((p.e1rm - min) / range) * h;
-    return `${x},${y}`;
-  }).join(" ");
-  return <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} style={{ flexShrink: 0 }}><polyline points={coords} fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" /></svg>;
+// Close-but-not-identical exercise names ("Calf Raise" vs "Calf Raises") are almost always the same
+// lift typed twice; names that differ by a number ("Sus Machine 1" / "Sus Machine 2") are not.
+const normName = (s) => s.toLowerCase().replace(/[^a-z0-9 ]/g, " ").split(/\s+/).filter(Boolean).map((w) => (w.length > 3 && w.endsWith("s") ? w.slice(0, -1) : w)).join(" ");
+function editDistance(a, b) {
+  const dp = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)]);
+  for (let j = 1; j <= b.length; j++) dp[0][j] = j;
+  for (let i = 1; i <= a.length; i++) for (let j = 1; j <= b.length; j++) dp[i][j] = Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+  return dp[a.length][b.length];
+}
+function findSimilarExercise(name, names) {
+  const typed = name.trim();
+  if (!typed || names.some((x) => x.toLowerCase() === typed.toLowerCase())) return null;
+  const n = normName(typed);
+  if (!n) return null;
+  for (const x of names) {
+    const m = normName(x);
+    if (m === n) return x;
+    if (n.replace(/[0-9]/g, "") === m.replace(/[0-9]/g, "")) continue;
+    if (n.length >= 5 && m.length >= 5 && editDistance(n, m) <= 2) return x;
+  }
+  return null;
 }
 
-function TickerItem({ series, onClick }) {
-  const first = series.points[0].e1rm, last = series.points[series.points.length - 1].e1rm;
-  const pctChange = first ? Math.round(((last - first) / first) * 100) : 0;
-  const up = last >= first;
-  const color = up ? "#22c55e" : "#ef4444";
-  const latest = series.points[series.points.length - 1];
+// Search that matches any part of a name, any word order: "press" finds Leg Press and Bench Press.
+function searchExercises(query, names, limit = 8, freq = {}) {
+  const words = query.toLowerCase().split(/\s+/).filter(Boolean);
+  if (!words.length) return [];
+  const score = (name) => {
+    const l = name.toLowerCase();
+    if (!words.every((w) => l.includes(w))) return null;
+    if (l.startsWith(words[0])) return 0;
+    if (words.every((w) => l.split(/[^a-z0-9]+/).some((t) => t.startsWith(w)))) return 1;
+    return 2;
+  };
+  return names.map((n) => ({ n, s: score(n) })).filter((x) => x.s !== null).sort((a, b) => a.s - b.s || (freq[b.n] || 0) - (freq[a.n] || 0) || a.n.localeCompare(b.n)).slice(0, limit).map((x) => x.n);
+}
+
+// Rest timer defaults: long for heavy compound lifts, shorter for isolation work.
+const ACCESSORY_RE = /curl|extension|raise|fly|flye|pushdown|push-down|pressdown|shrug|face pull|calf|kickback|crunch|skull|pullover|pulldown|reverse fly|rope|lateral/i;
+const restSecondsFor = (name) => (ACCESSORY_RE.test(name || "") ? 75 : 150);
+const fmtClock = (s) => `${Math.floor(Math.max(0, s) / 60)}:${pad(Math.max(0, s) % 60)}`;
+
+const IMPORT_DATA = [
+  // Front Squat (legsA)
+  { exercise: "Front Squat", workoutId: "legsA", weight: 155, sets: 3, reps: 8, date: "2025-08-04" },
+  { exercise: "Front Squat", workoutId: "legsA", weight: 155, sets: 3, reps: 8, date: "2025-09-08" },
+  { exercise: "Front Squat", workoutId: "legsA", weight: 165, sets: 3, reps: 8, date: "2025-09-28" },
+  { exercise: "Front Squat", workoutId: "legsA", weight: 175, sets: 3, reps: 8, date: "2025-10-09" },
+  { exercise: "Front Squat", workoutId: "legsA", weight: 185, sets: 3, reps: 8, date: "2025-10-14" },
+  { exercise: "Front Squat", workoutId: "legsA", weight: 195, sets: 3, reps: 8, date: "2025-10-19" },
+  { exercise: "Front Squat", workoutId: "legsA", weight: 195, sets: 3, reps: 8, date: "2025-10-27" },
+  // Back Squat (legsA)
+  { exercise: "Back Squat", workoutId: "legsA", weight: 185, sets: 3, reps: 8, date: "2025-09-08" },
+  { exercise: "Back Squat", workoutId: "legsA", weight: 205, sets: 3, reps: 8, date: "2025-09-29" },
+  { exercise: "Back Squat", workoutId: "legsA", weight: 205, sets: 3, reps: 8, date: "2025-10-02" },
+  { exercise: "Back Squat", workoutId: "legsA", weight: 225, sets: 3, reps: 8, date: "2025-10-14" },
+  { exercise: "Back Squat", workoutId: "legsA", weight: 225, sets: 3, reps: 8, date: "2025-10-19" },
+  { exercise: "Back Squat", workoutId: "legsA", weight: 230, sets: 3, reps: 8, date: "2025-10-27" },
+  { exercise: "Back Squat", workoutId: "legsA", weight: 245, sets: 3, reps: 8, date: "2025-11-13" },
+  { exercise: "Back Squat", workoutId: "legsA", weight: 205, sets: 1, reps: 10, date: "2026-01-14" },
+  { exercise: "Back Squat", workoutId: "legsA", weight: 205, sets: 1, reps: 10, date: "2026-01-20" },
+  { exercise: "Back Squat", workoutId: "legsA", weight: 135, sets: 5, reps: 5, date: "2026-04-10" },
+  { exercise: "Back Squat", workoutId: "legsA", weight: 155, sets: 5, reps: 5, date: "2026-04-18" },
+  { exercise: "Back Squat", workoutId: "legsA", weight: 175, sets: 5, reps: 5, date: "2026-04-21" },
+  { exercise: "Back Squat", workoutId: "legsA", weight: 155, sets: 5, reps: 5, date: "2026-05-15" },
+  // Incline Bench (push)
+  { exercise: "Incline Bench", workoutId: "push", weight: 155, sets: 3, reps: 8, date: "2025-09-08" },
+  { exercise: "Incline Bench", workoutId: "push", weight: 165, sets: 3, reps: 8, date: "2025-09-30" },
+  { exercise: "Incline Bench", workoutId: "push", weight: 190, sets: 3, reps: 8, date: "2025-10-02" },
+  { exercise: "Incline Bench", workoutId: "push", weight: 200, sets: 3, reps: 8, date: "2025-10-09" },
+  { exercise: "Incline Bench", workoutId: "push", weight: 205, sets: 3, reps: 8, date: "2025-10-14" },
+  { exercise: "Incline Bench", workoutId: "push", weight: 215, sets: 3, reps: 8, date: "2025-10-24" },
+  { exercise: "Incline Bench", workoutId: "push", weight: 225, sets: 1, reps: 2, date: "2026-01-19" },
+  // Incline Bench (DB) (push)
+  { exercise: "Incline Bench (DB)", workoutId: "push", weight: 65, sets: 3, reps: 8, date: "2025-10-16" },
+  { exercise: "Incline Bench (DB)", workoutId: "push", weight: 85, sets: 3, reps: 8, date: "2026-02-02" },
+  // Bench Press (push)
+  { exercise: "Bench Press", workoutId: "push", weight: 205, sets: 3, reps: 8, date: "2025-09-30" },
+  { exercise: "Bench Press", workoutId: "push", weight: 230, sets: 1, reps: 10, date: "2025-10-16" },
+  { exercise: "Bench Press", workoutId: "push", weight: 235, sets: 1, reps: 5, date: "2025-10-28" },
+  { exercise: "Bench Press", workoutId: "push", weight: 280, sets: 1, reps: 1, date: "2025-11-13" },
+  { exercise: "Bench Press", workoutId: "push", weight: 290, sets: 1, reps: 1, date: "2025-12-09" },
+  { exercise: "Bench Press", workoutId: "push", weight: 295, sets: 1, reps: 1, date: "2026-02-06" },
+  // Lat Pull Downs (pull)
+  { exercise: "Lat Pull Downs", workoutId: "pull", weight: 165, sets: 3, reps: 10, date: "2025-09-29" },
+  { exercise: "Lat Pull Downs", workoutId: "pull", weight: 165, sets: 3, reps: 10, date: "2025-10-02" },
+  // DB Shrugs (pull)
+  { exercise: "DB Shrugs", workoutId: "pull", weight: 70, sets: 3, reps: 8, date: "2025-09-29" },
+  // Machine Shrugs (pull)
+  { exercise: "Machine Shrugs", workoutId: "pull", weight: 140, sets: 3, reps: 8, date: "2025-10-07" },
+  { exercise: "Machine Shrugs", workoutId: "pull", weight: 160, sets: 3, reps: 8, date: "2025-11-18" },
+  // Skull Crushers (arms)
+  { exercise: "Skull Crushers", workoutId: "arms", weight: 70, sets: 3, reps: 8, date: "2025-10-17" },
+  { exercise: "Skull Crushers", workoutId: "arms", weight: 80, sets: 3, reps: 8, date: "2025-10-24" },
+  // Tricep Pushdowns (arms)
+  { exercise: "Tricep Pushdowns", workoutId: "arms", weight: 80, sets: 3, reps: 8, date: "2025-10-17" },
+  { exercise: "Tricep Pushdowns", workoutId: "arms", weight: 55, sets: 3, reps: 8, date: "2026-01-24" },
+  // Tricep Machine Extensions (arms)
+  { exercise: "Tricep Machine Extensions", workoutId: "arms", weight: 70, sets: 1, reps: 12, date: "2026-01-19" },
+  // Pec Deck (push)
+  { exercise: "Pec Deck", workoutId: "push", weight: 155, sets: 3, reps: 12, date: "2025-10-24" },
+  { exercise: "Pec Deck", workoutId: "push", weight: 165, sets: 3, reps: 12, date: "2026-01-11" },
+  // Barbell Curl (arms)
+  { exercise: "Barbell Curl", workoutId: "arms", weight: 50, sets: 3, reps: 8, date: "2025-11-18" },
+  // Hammer Curl (arms)
+  { exercise: "Hammer Curl", workoutId: "arms", weight: 32.5, sets: 3, reps: 8, date: "2025-11-18" },
+  // Leg Curls (legsA)
+  { exercise: "Leg Curls", workoutId: "legsA", weight: 150, sets: 4, reps: 10, date: "2026-01-29" },
+  { exercise: "Leg Curls", workoutId: "legsA", weight: 110, sets: 4, reps: 10, date: "2026-04-18" },
+  { exercise: "Leg Curls", workoutId: "legsA", weight: 80, sets: 4, reps: 10, date: "2026-07-29" },
+  // Dip Machine (push)
+  { exercise: "Dip Machine", workoutId: "push", weight: 180, sets: 3, reps: 8, date: "2026-01-24" },
+  { exercise: "Dip Machine", workoutId: "push", weight: 175, sets: 3, reps: 8, date: "2026-08-08" },
+  // Sus Machine (legs, merged)
+  { exercise: "Sus Machine", workoutId: "legsA", weight: 170, sets: 3, reps: 8, date: "2026-02-14" },
+  // Dips (Weighted) (push)
+  { exercise: "Dips (Weighted)", workoutId: "push", weight: 45, sets: 3, reps: 8, date: "2026-07-14" },
+  // Standing Calf Raise (legsA)
+  { exercise: "Standing Calf Raise", workoutId: "legsA", weight: 100, sets: 3, reps: 8, date: "2026-07-30" },
+];
+const IMPORT_SKIPPED = [
+  "Zercher Squat — no weight/data logged, nothing to import",
+  "OH Press 115 lbs — no date given",
+  "Rows 9/29, 10/7, 10/18 (\"long bricks\") — machine plate weight unknown, log manually once you know the lbs",
+  "Hammer Curls DB 2/7 — no weight given",
+  "Dip Machine 225 lbs — no date given (listed separately from the dated entries)",
+  "Leg Extensions 150 lbs — no date given",
+];
+
+// Second one-time batch — Incline Bench history from a separate written log. Reps/sets weren't
+// recorded for most of these, so per your call: assumed 6 reps x 3 sets for every entry except
+// 1/19, which explicitly said "2x".
+const INCLINE_IMPORT_DATA = [
+  { date: "2025-09-08", workoutId: "push", exercise: "Incline Bench", weight: 155, reps: 6, sets: 3 },
+  { date: "2025-09-30", workoutId: "push", exercise: "Incline Bench", weight: 165, reps: 6, sets: 3 },
+  { date: "2025-10-02", workoutId: "push", exercise: "Incline Bench", weight: 190, reps: 6, sets: 3 },
+  { date: "2025-10-09", workoutId: "push", exercise: "Incline Bench", weight: 200, reps: 6, sets: 3 },
+  { date: "2025-10-14", workoutId: "push", exercise: "Incline Bench", weight: 205, reps: 6, sets: 3 },
+  { date: "2025-10-16", workoutId: "push", exercise: "Incline Bench (DB)", weight: 65, reps: 6, sets: 3 },
+  { date: "2025-10-24", workoutId: "push", exercise: "Incline Bench", weight: 215, reps: 6, sets: 3 },
+  { date: "2026-01-19", workoutId: "push", exercise: "Incline Bench", weight: 225, reps: 2, sets: 3 },
+  { date: "2026-02-02", workoutId: "push", exercise: "Incline Bench (DB)", weight: 85, reps: 6, sets: 3 },
+  { date: "2026-08-08", workoutId: "push", exercise: "Incline Bench", weight: 185, reps: 6, sets: 3 },
+];
+
+// ---- Accent colors for the honeycomb picker (centre = the default Bloomberg orange) -------------------
+const HONEY_COLORS = [
+  "#ff6600",
+  "#ffb000", "#f5d90a", "#7ed957", "#1ecbe1", "#5b8cff", "#b26bff",
+  "#ff4d4d", "#ff8a5c", "#ffd24d", "#c4e86b", "#38d9a9", "#66d9e8", "#4dabf7", "#8aa0ff", "#da77f2", "#f783ac", "#ff9aa2", "#ff6ec7",
+];
+const useIsoLayoutEffect = typeof window !== "undefined" ? useLayoutEffect : useEffect;
+const DEFAULT_SETTINGS = { bodyWeight: 175, mode: "dark", accent: "#ff6600", sound: true, vibe: true, ai: true, goal: "strength", fontText: "ibm-plex-sans", fontV: 2, fontNum: "jetbrains-mono", glass: true, gl: "ios", unit: "lbs", dotNums: true, bodyWeight: 0 };
+const TEXT_FONTS = [["space-grotesk", "Space Grotesk"], ["ibm-plex-sans", "IBM Plex Sans"], ["barlow", "Barlow"], ["inter", "Inter"], ["sf-pro", "SF Pro (system)"]];
+const NUM_FONTS = [["jetbrains-mono", "JetBrains Mono"], ["ibm-plex-mono", "IBM Plex Mono"], ["sf-mono", "SF Mono (system)"], ["space-mono", "Space Mono"], ["same", "Same as text font"]];
+const GOALS = [
+  { key: "strength", label: "Build strength" },
+  { key: "muscle", label: "Build muscle" },
+  { key: "back", label: "Get back on track" },
+  { key: "general", label: "General fitness" },
+];
+
+// ---- Digest: the numbers behind the cards -------------------------------------------------------------
+// Compares the last 30 days with the 30 before. The app does the math; the AI (or the plain fallback
+// below) only words it, so the cards can't invent figures.
+const DIGEST_WINDOW = 30;
+const hashStr = (str) => { let h = 5381; for (let i = 0; i < str.length; i++) h = ((h << 5) + h + str.charCodeAt(i)) | 0; return (h >>> 0).toString(36); };
+
+function computeDigestStats({ strengthEntries, dayStats, todayIso, workouts, exercises, due, goal, unit = "lbs" }) {
+  const cw = (w) => (unit === "kg" ? r1(w * KG_PER_LB) : w);
+  const curStart = shiftDate(todayIso, -(DIGEST_WINDOW - 1));
+  const prevStart = shiftDate(todayIso, -(2 * DIGEST_WINDOW - 1));
+  const prevEnd = shiftDate(curStart, -1);
+  const byEx = {};
+  strengthEntries.forEach((e) => { if (e.date >= prevStart) (byEx[e.exercise] = byEx[e.exercise] || []).push(e); });
+  const sess = (arr) => new Set(arr.map((e) => e.date)).size;
+  const setsOf = (arr) => arr.reduce((t, e) => t + Math.max(1, e.sets || 1), 0);
+  const topW = (arr) => Math.max(...arr.map((e) => e.weight));
+  const best = (arr) => arr.reduce((b, e) => (!b || e1(e) > e1(b) ? e : b), null);
+  const perWeek = (n) => Math.round((n / (DIGEST_WINDOW / 7)) * 10) / 10;
+  const lifts = [], stalled = [];
+  Object.entries(byEx).forEach(([name, list]) => {
+    const cur = list.filter((e) => e.date >= curStart), prev = list.filter((e) => e.date <= prevEnd);
+    if (sess(list) >= 3 && plateauFlag(list)) stalled.push(name);
+    if (!cur.length || !prev.length) return;
+    const bc = best(cur), bp = best(prev);
+    const ec = e1(bc), ep = e1(bp);
+    const wc = topW(cur), wp = topW(prev);
+    const drivers = [];
+    if (wc !== wp) drivers.push(`top weight ${wc > wp ? "up" : "down"} from ${cw(wp)} to ${cw(wc)} ${unit}`);
+    const prevAtW = prev.filter((e) => e.weight === wc);
+    if (prevAtW.length) {
+      const rc = Math.max(...cur.filter((e) => e.weight === wc).map((e) => e.reps)), rp = Math.max(...prevAtW.map((e) => e.reps));
+      if (rc !== rp) drivers.push(`best reps at ${cw(wc)} ${unit} ${rc > rp ? "up" : "down"} from ${rp} to ${rc}`);
+    }
+    if (sess(cur) !== sess(prev)) drivers.push(`${sess(cur)} sessions vs ${sess(prev)} in the prior 30 days`);
+    if (setsOf(cur) !== setsOf(prev)) drivers.push(`about ${perWeek(setsOf(cur))} sets a week vs ${perWeek(setsOf(prev))}`);
+    lifts.push({ name, changePct: Math.round(((ec - ep) / ep) * 1000) / 10, bestNow: `${cw(bc.weight)} x ${bc.reps}`, bestBefore: `${cw(bp.weight)} x ${bp.reps}`, e1rmNow: cw(ec), e1rmBefore: cw(ep), drivers });
+  });
+  const improving = lifts.filter((l) => l.changePct >= 2).sort((a, b) => b.changePct - a.changePct).slice(0, 3);
+  const slipping = lifts.filter((l) => l.changePct <= -2).sort((a, b) => a.changePct - b.changePct).slice(0, 3);
+  const flagged = new Set([...improving, ...slipping].map((l) => l.name));
+  const overdue = dayStats.filter((d) => d.days >= 4 && d.days !== Infinity).sort((a, b) => b.days - a.days).slice(0, 2).map((d) => ({ day: d.workout.name, daysSinceFullSession: d.days }));
+  const curSessions = sess(strengthEntries.filter((e) => e.date >= curStart)), prevSessions = sess(strengthEntries.filter((e) => e.date >= prevStart && e.date <= prevEnd));
+  // Last workout: the most recent date anything was logged, with the best set of each exercise.
+  let lastWorkout = null;
+  if (strengthEntries.length) {
+    const lastDate = strengthEntries.reduce((m, e) => (e.date > m ? e.date : m), "");
+    const dayEntries = strengthEntries.filter((e) => e.date === lastDate);
+    const exSet = new Set(dayEntries.map((e) => e.exercise.toLowerCase()));
+    let dayName = null, bestN = 0;
+    (workouts || []).forEach((w) => {
+      const n = ((exercises || {})[w.id] || []).filter((x) => exSet.has(x.toLowerCase())).length;
+      if (n > bestN) { bestN = n; dayName = w.name; }
+    });
+    const per = {};
+    dayEntries.forEach((e) => {
+      const p = (per[e.exercise] = per[e.exercise] || { sets: 0, top: null });
+      p.sets += Math.max(1, e.sets || 1);
+      if (!p.top || e1(e) > e1(p.top)) p.top = e;
+    });
+    const topSets = Object.entries(per)
+      .map(([exercise, p]) => ({ exercise, topSet: `${cw(p.top.weight)} x ${p.top.reps}`, sets: p.sets, score: e1(p.top) }))
+      .sort((a, b) => b.score - a.score).slice(0, 6).map((t) => ({ exercise: t.exercise, topSet: t.topSet, sets: t.sets }));
+    lastWorkout = { date: lastDate, daysAgo: daysBetween(lastDate, todayIso), day: dayName, topSets };
+  }
+  // New PRs: best estimated 1RM in the current window beats everything logged before it.
+  const newPRs = [];
+  const allBy = {};
+  strengthEntries.forEach((e) => { (allBy[e.exercise] = allBy[e.exercise] || []).push(e); });
+  Object.entries(allBy).forEach(([name, list]) => {
+    const cur = list.filter((e) => e.date >= curStart), old = list.filter((e) => e.date < curStart);
+    if (!cur.length || !old.length) return;
+    const bc = best(cur), bo = best(old);
+    const ec = e1(bc), eo = e1(bo);
+    if (ec > eo) newPRs.push({ exercise: name, now: `${cw(bc.weight)} x ${bc.reps}`, before: `${cw(bo.weight)} x ${bo.reps}`, date: bc.date, gainPct: Math.round(((ec - eo) / eo) * 1000) / 10 });
+  });
+  newPRs.sort((a, b) => b.gainPct - a.gainPct);
+  const dueNext = due ? { day: due.day, daysSinceFullSession: Number.isFinite(due.days) ? due.days : null } : null;
+  return { windowDays: DIGEST_WINDOW, unit, goal: goal || "", lastWorkout, newPRs: newPRs.slice(0, 3), dueNext, improving, slipping, stalled: stalled.filter((n) => !flagged.has(n)).slice(0, 3), overdue, trainingDaysNow: curSessions, trainingDaysBefore: prevSessions, liftsCompared: lifts.length };
+}
+
+// Plain-English digest built straight from the stats. Used when AI is off, unavailable or fails.
+function digestBasic(stats) {
+  const out = {
+    last: "Log a few sessions and your last workout shows up here.",
+    up: "Nothing to compare yet. The digest looks at the last 30 days against the 30 before.",
+    down: "Nothing slipping or flat yet.",
+    due: "Pick a day on the Workout tab to get started.",
+  };
+  if (!stats) return out;
+  const lw = stats.lastWorkout;
+  if (lw) {
+    const when = lw.daysAgo === 0 ? "today" : lw.daysAgo === 1 ? "yesterday" : `${lw.daysAgo} days ago`;
+    out.last = `${lw.day ? lw.day + ", " : ""}${when}: ` + lw.topSets.slice(0, 4).map((t) => `${t.exercise} ${t.topSet}`).join(", ") + "." + (stats.newPRs.length ? ` New PR: ${stats.newPRs[0].exercise} ${stats.newPRs[0].now}.` : "");
+  }
+  if (stats.improving.length) {
+    const l = stats.improving[0];
+    out.up = stats.improving.map((x) => `${x.name} +${x.changePct}%`).join(", ") + "." + (l.drivers.length ? ` Likely why: ${l.drivers[0]}.` : "");
+  } else out.up = "No clear gains over the last 30 days yet.";
+  if (stats.slipping.length) {
+    const l = stats.slipping[0];
+    out.down = stats.slipping.map((x) => `${x.name} -${Math.abs(x.changePct)}%`).join(", ") + "." + (l.drivers.length ? ` Likely why: ${l.drivers[0]}.` : "") + (stats.stalled.length ? ` Flat: ${stats.stalled.join(", ")}.` : "");
+  } else if (stats.stalled.length) out.down = `Flat for 3 sessions: ${stats.stalled.join(", ")}.`;
+  if (stats.dueNext) out.due = `${stats.dueNext.day} is due` + (stats.dueNext.daysSinceFullSession !== null ? `, ${stats.dueNext.daysSinceFullSession} days since a full session.` : ".");
+  return out;
+}
+
+// Dot-matrix icons: each row is a string, "#" = a dot. Matches the dotted heart and the dot-matrix type.
+function DotIcon({ rows, color, size = 26 }) {
+  const w = Math.max(...rows.map((r) => r.length)), h = rows.length;
+  const dots = [];
+  rows.forEach((r, y) => { for (let x = 0; x < r.length; x++) if (r[x] === "#") dots.push(<circle key={x + "-" + y} cx={x + 0.5} cy={y + 0.5} r="0.4" />); });
+  return <svg width={size} height={size * h / w} viewBox={`0 0 ${w} ${h}`} fill={color} aria-hidden="true">{dots}</svg>;
+}
+const DOT_PLUS = ["..#..","..#..","#####","..#..","..#.."];
+const DOT_MINUS = ["#####"];
+const DOT_X = ["#...#",".#.#.","..#..",".#.#.","#...#"];
+const DOT_HOME = [".....#.....","....#.#....","...#...#...","..#.....#..",".#.......#.","..#.....#..","..#.###.#..","..#.#.#.#..","..#.#.#.#..","..#######.."];
+const DOT_LIFT = ["..##.....##..",".###.....###.","####.....####","#############","####.....####",".###.....###.","..##.....##.."];
+const DOT_CHART = ["........##.","........##.","........##.","........##.","....##..##.","....##..##.","....##..##.","##..##..##.","##..##..##.","##..##..##."];
+const DOT_PEOPLE = [".###.....###.",".###.....###.",".###.....###.",".............",".###.....###.","#####...#####","#####...#####"];
+const NAV_ICON_PROPS = { width: 22, height: 22, viewBox: "0 0 24 24", fill: "none", strokeWidth: 2, strokeLinecap: "round", strokeLinejoin: "round" };
+function IconHome({ color, size }) { return <svg {...NAV_ICON_PROPS} width={size || NAV_ICON_PROPS.width} height={size || NAV_ICON_PROPS.height} stroke={color}><path d="M3 11l9-8 9 8" /><path d="M5 10v10h14V10" /></svg>; }
+function IconPortfolio({ color }) { return <svg {...NAV_ICON_PROPS} stroke={color} strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M2.5 20V15l5.5-5.5 3.5 3.5 6-7.5 4 3.5V20z" fill={color} fillOpacity=".3" stroke="none" /><path d="M2.5 15l5.5-5.5 3.5 3.5 6-7.5 4 3.5" fill="none" /></svg>; }
+function IconDumbbellTilt({ color }) { return <svg {...NAV_ICON_PROPS} stroke={color} strokeWidth="1.9"><g transform="rotate(-45 12 12)"><path d="M8 12h8" strokeWidth="2.2" /><rect x="4.2" y="7" width="3.8" height="10" rx="1.6" /><rect x="16" y="7" width="3.8" height="10" rx="1.6" /><path d="M1.6 10v4M22.4 10v4" strokeWidth="2.2" /></g></svg>; }
+function IconDumbbell({ color }) { return <svg {...NAV_ICON_PROPS} stroke={color} style={{ transform: "rotate(45deg)" }}><path d="M6 7v10M18 7v10" /><path d="M2 10v4M22 10v4" /><path d="M6 12h12" strokeWidth="3" /></svg>; }
+function IconChart({ color }) { return <svg {...NAV_ICON_PROPS} stroke={color}><path d="M4 20V4" /><path d="M4 20h16" /><path d="M7 16l4-5 3 3 5-7" /></svg>; }
+function IconFeed({ color }) { return <svg {...NAV_ICON_PROPS} stroke={color}><circle cx="8" cy="8" r="3" /><circle cx="17" cy="9" r="2.4" /><path d="M2.5 20c0-3.3 2.5-5.5 5.5-5.5s5.5 2.2 5.5 5.5" /><path d="M15 15c.7-.4 1.4-.5 2-.5 2.5 0 4.5 1.8 4.5 4.5" /></svg>; }
+function IconBulb({ color }) { return <svg {...NAV_ICON_PROPS} stroke={color}><path d="M9 18h6" /><path d="M10 22h4" /><path d="M12 2a6 6 0 00-4 10.5c.7.6 1 1.3 1 2.5h6c0-1.2.3-1.9 1-2.5A6 6 0 0012 2z" /></svg>; }
+// Dots under a line, laid on a 4px grid. Only whole dots are drawn: none are cut by the line or the baseline.
+const AreaDots = memo(function AreaDots({ pts, baseY, color }) {
+  const d = useMemo(() => {
+    const P = pts.map((q) => q.split(",").map(Number));
+    if (P.length < 2) return "";
+    const x0 = P[0][0], x1 = P[P.length - 1][0];
+    let out = "", k = 0;
+    const startX = Math.ceil((x0 + 1.5 - 2) / 4) * 4 + 2;
+    for (let cx = startX; cx <= x1 - 1.5; cx += 4) {
+      while (k < P.length - 2 && P[k + 1][0] < cx) k++;
+      const a = P[k], b = P[k + 1], f = b[0] === a[0] ? 0 : Math.min(1, Math.max(0, (cx - a[0]) / (b[0] - a[0])));
+      const ly = a[1] + (b[1] - a[1]) * f;
+      for (let cy = baseY - 1.2; cy >= ly + 2.7; cy -= 4) out += `M${cx} ${cy}h0`;
+    }
+    return out;
+  }, [pts, baseY]);
+  return <path d={d} stroke={color} strokeOpacity="0.75" strokeWidth="2" strokeLinecap="round" fill="none" />;
+});
+
+function ClearX({ onClick, label }) {
   return (
-    <div className="ticker-item" onClick={onClick} style={{ cursor: "pointer" }}>
-      <div className="ticker-name">{series.exercise}</div>
-      <div className="ticker-value">{latest.weight}<span className="ticker-unit">× {latest.reps}</span></div>
-      <Sparkline points={series.points} color={color} />
-      <div className="ticker-change" style={{ color }}>{up ? "▲" : "▼"} {Math.abs(pctChange)}%</div>
-    </div>
+    <button type="button" className="clear-x" aria-label={label} onMouseDown={(e) => e.preventDefault()} onClick={onClick}>
+      <DotIcon rows={DOT_X} color="currentColor" size={12} />
+    </button>
   );
 }
 
-const NAV_ICON_PROPS = { width: 22, height: 22, viewBox: "0 0 24 24", fill: "none", strokeWidth: 2, strokeLinecap: "round", strokeLinejoin: "round" };
-function IconHome({ color, size }) { return <svg {...NAV_ICON_PROPS} width={size || NAV_ICON_PROPS.width} height={size || NAV_ICON_PROPS.height} stroke={color}><path d="M3 11l9-8 9 8" /><path d="M5 10v10h14V10" /></svg>; }
-function IconDumbbell({ color }) { return <svg {...NAV_ICON_PROPS} stroke={color} style={{ transform: "rotate(45deg)" }}><path d="M6 7v10M18 7v10" /><path d="M2 10v4M22 10v4" /><path d="M6 12h12" strokeWidth="3" /></svg>; }
-function IconChart({ color }) { return <svg {...NAV_ICON_PROPS} stroke={color}><path d="M4 20V4" /><path d="M4 20h16" /><path d="M7 16l4-5 3 3 5-7" /></svg>; }
-function IconBulb({ color }) { return <svg {...NAV_ICON_PROPS} stroke={color}><path d="M9 18h6" /><path d="M10 22h4" /><path d="M12 2a6 6 0 00-4 10.5c.7.6 1 1.3 1 2.5h6c0-1.2.3-1.9 1-2.5A6 6 0 0012 2z" /></svg>; }
+function IconGear({ size = 18 }) { return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-.09a1.65 1.65 0 00-1.51 1z" /></svg>; }
 function IconTarget({ color }) { return <svg {...NAV_ICON_PROPS} stroke={color}><circle cx="12" cy="12" r="9" /><circle cx="12" cy="12" r="5" /><circle cx="12" cy="12" r="1" fill={color} /></svg>; }
 function IconBook({ color }) { return <svg {...NAV_ICON_PROPS} stroke={color}><path d="M4 4.5A2.5 2.5 0 016.5 2H20v17H6.5A2.5 2.5 0 004 21.5v-17z" /><path d="M4 19.5A2.5 2.5 0 016.5 17H20" /></svg>; }
 
-function PortfolioChart({ rows, color, onScrub, onSwipeStart, onSwipeMove, onSwipeEnd }) {
+// A honeycomb of hexagonal color swatches: the centre one is the default, two rings around it.
+function HoneyPicker({ value, onPick }) {
+  const SIZE = 19, SQ3 = Math.sqrt(3);
+  const spots = [[0, 0], [1, 0], [0, 1], [-1, 1], [-1, 0], [0, -1], [1, -1], [2, 0], [1, 1], [0, 2], [-1, 2], [-2, 2], [-2, 1], [-2, 0], [-1, -1], [0, -2], [1, -2], [2, -2], [2, -1]];
+  const hexPts = (cx, cy, r) => Array.from({ length: 6 }, (_, i) => { const a = (Math.PI / 180) * (60 * i - 30); return `${(cx + r * Math.cos(a)).toFixed(1)},${(cy + r * Math.sin(a)).toFixed(1)}`; }).join(" ");
+  return (
+    <svg viewBox="-86 -78 172 156" style={{ width: "100%", maxWidth: 206, display: "block", margin: "16px auto 24px" }} role="radiogroup" aria-label="Accent color">
+      {spots.map(([q, r], i) => {
+        const cx = SIZE * SQ3 * (q + r / 2), cy = SIZE * 1.5 * r;
+        const color = HONEY_COLORS[i];
+        const on = (value || "").toLowerCase() === color;
+        return (
+          <polygon key={color} points={hexPts(cx, cy, SIZE * 0.97)} fill={color} stroke={on ? "var(--text-primary)" : "var(--bg)"} strokeWidth={on ? 3 : 1.5} strokeLinejoin="round"
+            role="radio" aria-checked={on} aria-label={color} style={{ cursor: "pointer" }} onClick={() => onPick(color)} />
+        );
+      })}
+    </svg>
+  );
+}
+
+function PortfolioChart({ rows, maRows, color, onScrub, intro = false }) {
   const [activeIndex, setActiveIndex] = useState(null);
+  const introRef = useRef(intro);
+  const revealRef = useRef(intro ? 0 : 1);
   const svgRef = useRef(null);
-  const draggingRef = useRef(false);
-  const gestureModeRef = useRef(null); // null | "scrub" | "swipe" — decided once per touch
-  const startPosRef = useRef(null);
-  const startTimeRef = useRef(0);
-  const swipeBaseRef = useRef(0);
-  const W = 340, H = 170, padL = 4, padR = 4, padT = 10, padB = 4;
-  if (rows.length < 2) return <div className="empty">Log more sessions across a few exercises to see this.</div>;
-  const vals = rows.map((r) => r.value);
-  const min = Math.min(...vals), max = Math.max(...vals);
-  const range = max - min || 1;
+  // Measure the real box so the line runs edge to edge with nothing letterboxed.
+  const [box, setBox] = useState({ w: 340, h: 170 });
+  useEffect(() => {
+    const el = svgRef.current;
+    if (!el) return undefined;
+    const measure = () => { const r = el.getBoundingClientRect(); if (r.width > 0 && r.height > 0) setBox((b) => (Math.abs(b.w - r.width) > 0.5 || Math.abs(b.h - r.height) > 0.5 ? { w: r.width, h: r.height } : b)); };
+    measure();
+    window.addEventListener("resize", measure);
+    const ro = window.ResizeObserver ? new ResizeObserver(measure) : null;
+    if (ro) ro.observe(el);
+    return () => { window.removeEventListener("resize", measure); if (ro) ro.disconnect(); };
+  }, [rows.length]);
+  const W = box.w, H = box.h, padL = 0, padR = 0, padT = 12, padB = 2;
   const n = rows.length;
-  const x = (i) => padL + (i / (n - 1)) * (W - padL - padR);
+  const vals = rows.map((r) => r.value);
+  const maVals = (maRows || []).filter((v) => v !== null && v !== undefined);
+  const all = [...vals, ...maVals, 0];
+  const min = Math.min(...all), max = Math.max(...all);
+  const range = max - min || 1;
+  const x = (i) => padL + (n > 1 ? (i / (n - 1)) * (W - padL - padR) : 0);
   const y = (v) => padT + (1 - (v - min) / range) * (H - padT - padB);
 
-  const posToIndex = (clientX) => {
+  const getIndex = (clientX) => {
     const svg = svgRef.current;
-    if (!svg) return null;
+    if (!svg || n < 2) return null;
     const rect = svg.getBoundingClientRect();
     const relX = ((clientX - rect.left) / rect.width) * W;
-    let nearest = 0, minDist = Infinity;
-    rows.forEach((r, i) => { const d = Math.abs(x(i) - relX); if (d < minDist) { minDist = d; nearest = i; } });
-    return nearest;
+    return Math.min(n - 1, Math.max(0, Math.round(((relX - padL) / (W - padL - padR)) * (n - 1))));
   };
-  const scrubTo = (clientX) => {
-    const idx = posToIndex(clientX);
-    if (idx === null) return;
-    setActiveIndex(idx);
-    if (onScrub) onScrub(rows[idx]);
+  const setActive = (i) => {
+    setActiveIndex(i);
+    if (onScrub) onScrub(i === null ? null : rows[i]);
   };
+  const handlers = useHoldScrub(getIndex, setActive, svgRef);
 
-  // A touch that starts on this chart is fully owned by JS from the first pixel — the browser's
-  // own swipe gesture and our own scrub gesture can't be allowed to race each other, since
-  // whichever wins first locks out the other for the rest of that touch. Decide intent from the
-  // first ~220ms: quick horizontal movement means "swipe the carousel" (driven manually here,
-  // since native scrolling is off for this element); holding still means "scrub."
-  const HOLD_MS = 220, MOVE_THRESHOLD = 8;
-  const startScrub = (e) => {
-    if (e.pointerType !== "touch") {
-      draggingRef.current = true;
-      scrubTo(e.clientX);
-      return;
-    }
-    startPosRef.current = { x: e.clientX, y: e.clientY };
-    startTimeRef.current = Date.now();
-    gestureModeRef.current = null;
+  // The shaded area is a field of real dots on a canvas, so the ones around your finger can swell
+  // while you hold: about 3 dots to each side and 6 below the line.
+  const baseRef = useRef(null), hotRef = useRef(null);
+  const [themeTick, setThemeTick] = useState(0);
+  useEffect(() => {
+    if (typeof MutationObserver === "undefined") return undefined;
+    const mo = new MutationObserver(() => setThemeTick((t) => t + 1));
+    mo.observe(document.documentElement, { attributes: true, attributeFilter: ["style", "data-theme"] });
+    return () => mo.disconnect();
+  }, []);
+  useEffect(() => {
+    if (!introRef.current) return undefined;
+    let raf = 0; const t0 = performance.now() + 230;
+    const step = (now) => { revealRef.current = Math.min(1, Math.max(0, (now - t0) / 420)); setThemeTick((t) => t + 1); if (revealRef.current < 1) raf = requestAnimationFrame(step); };
+    raf = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(raf);
+  }, []);
+  const DOT_GAP = 3.2;
+  const resolveColor = (c) => {
+    const m = /^var\((--[a-z-]+)\)$/.exec(c || "");
+    return m ? getComputedStyle(document.documentElement).getPropertyValue(m[1]).trim() || "#34C759" : c;
   };
-  const moveScrub = (e) => {
-    if (e.pointerType !== "touch") {
-      if (draggingRef.current) scrubTo(e.clientX);
-      return;
-    }
-    if (!startPosRef.current) return;
-    const dx = e.clientX - startPosRef.current.x, dy = e.clientY - startPosRef.current.y;
-    const elapsed = Date.now() - startTimeRef.current;
-
-    if (gestureModeRef.current === null) {
-      if (Math.abs(dx) > MOVE_THRESHOLD && Math.abs(dx) > Math.abs(dy) && elapsed < HOLD_MS) {
-        gestureModeRef.current = "swipe";
-        swipeBaseRef.current = onSwipeStart ? onSwipeStart() : 0;
-      } else if (elapsed >= HOLD_MS && Math.abs(dx) < MOVE_THRESHOLD && Math.abs(dy) < MOVE_THRESHOLD) {
-        gestureModeRef.current = "scrub";
-        draggingRef.current = true;
-        scrubTo(e.clientX);
+  const lineYAt = (px) => {
+    const f = Math.min(n - 1, Math.max(0, (px - padL) / ((W - padL - padR) / (n - 1))));
+    const i0 = Math.floor(f), i1 = Math.min(n - 1, i0 + 1), fr = f - i0;
+    return y(rows[i0].value) * (1 - fr) + y(rows[i1].value) * fr;
+  };
+  const fadeAt = (gy) => { const f = gy / H; return f <= 0.7 ? 1 - 0.65 * (f / 0.7) : 0.35 * Math.max(0, 1 - (f - 0.7) / 0.3); };
+  const setupCanvas = (cv) => {
+    const dpr = window.devicePixelRatio || 1;
+    const w = Math.max(1, Math.round(W * dpr)), h = Math.max(1, Math.round(H * dpr));
+    if (cv.width !== w) cv.width = w;
+    if (cv.height !== h) cv.height = h;
+    const ctx = cv.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+    return ctx;
+  };
+  useEffect(() => {
+    const cv = baseRef.current;
+    if (!cv || n < 2) return;
+    const ctx = setupCanvas(cv);
+    ctx.fillStyle = resolveColor(color);
+    const li = document.documentElement.getAttribute("data-theme") === "light";
+    for (let gx = 1.6; gx < W; gx += DOT_GAP) {
+      const ly = lineYAt(gx);
+      for (let gy = 1.6; gy < H; gy += DOT_GAP) {
+        if (gy < ly + 2.7) continue; // keep whole dots clear of the line stroke
+        if (gy > H - 1.5) break;
+        if (gy > revealRef.current * H) break; // start-up: the dots come in from the top, row by row
+        const a = fadeAt(gy);
+        if (a < 0.02) continue;
+        ctx.globalAlpha = li ? Math.min(1, a * 1.8) : a;
+        ctx.beginPath(); ctx.arc(gx, gy, li ? 1.15 : 0.9, 0, Math.PI * 2); ctx.fill();
       }
-      return;
     }
-    if (gestureModeRef.current === "swipe") {
-      if (onSwipeMove) onSwipeMove(swipeBaseRef.current - dx);
-    } else if (gestureModeRef.current === "scrub") {
-      scrubTo(e.clientX);
+    ctx.globalAlpha = 1;
+  });
+  useEffect(() => {
+    const cv = hotRef.current;
+    if (!cv || n < 2) return;
+    const ctx = setupCanvas(cv);
+    if (activeIndex === null || !rows[activeIndex]) return;
+    const ax = x(activeIndex), ay = y(rows[activeIndex].value);
+    const rx = 3.5 * DOT_GAP, ry = 6.5 * DOT_GAP;
+    ctx.fillStyle = resolveColor(color);
+    const startX = Math.floor((ax - rx) / DOT_GAP) * DOT_GAP + 1.6;
+    for (let gx = startX; gx < ax + rx; gx += DOT_GAP) {
+      if (gx < 0 || gx > W) continue;
+      const ly = lineYAt(gx);
+      for (let gy = Math.floor(ay / DOT_GAP) * DOT_GAP + 1.6; gy < ay + ry; gy += DOT_GAP) {
+        if (gy < ly + 2.7 || gy > H - 1.5) continue;
+        const dx = (gx - ax) / rx, dy = (gy - ay) / ry, d2 = dx * dx + dy * dy;
+        if (d2 >= 1) continue;
+        const k = (1 - d2) * (1 - d2);
+        ctx.globalAlpha = Math.min(1, fadeAt(gy) + 0.55 * k);
+        ctx.beginPath(); ctx.arc(gx, gy, 0.9 + 1.5 * k, 0, Math.PI * 2); ctx.fill();
+      }
     }
-  };
-  const endScrub = () => {
-    if (gestureModeRef.current === "swipe" && onSwipeEnd) onSwipeEnd();
-    gestureModeRef.current = null;
-    draggingRef.current = false;
-    startPosRef.current = null;
-  };
+    ctx.globalAlpha = 1;
+  });
+
+  if (n < 2) return <div className="empty">Log more sessions across a few exercises to see this.</div>;
 
   const pts = rows.map((r, i) => `${x(i)},${y(r.value)}`).join(" ");
   const areaPts = `${x(0)},${H} ${pts} ${x(n - 1)},${H}`;
-  const active = activeIndex !== null ? { x: x(activeIndex), y: y(rows[activeIndex].value) } : null;
-  const avgValue = vals.reduce((a, b) => a + b, 0) / vals.length;
-  const avgY = y(avgValue);
+  const active = activeIndex !== null && rows[activeIndex] ? { x: x(activeIndex), y: y(rows[activeIndex].value) } : null;
+  // The moving average is drawn as separate runs so gaps (not enough history yet) stay gaps.
+  const maRuns = [];
+  if (maRows) {
+    let run = [];
+    maRows.forEach((v, i) => {
+      if (v === null || v === undefined) { if (run.length) maRuns.push(run); run = []; } else run.push(`${x(i)},${y(v)}`);
+    });
+    if (run.length) maRuns.push(run);
+  }
 
   return (
+    <>
+    <canvas ref={baseRef} className="pf-dots" aria-hidden="true" />
+    <canvas ref={hotRef} className="pf-dots" aria-hidden="true" />
     <svg
       ref={svgRef}
       viewBox={`0 0 ${W} ${H}`}
-      style={{ width: "100%", height: 190, touchAction: "none", cursor: "crosshair" }}
-      onPointerDown={startScrub}
-      onPointerMove={moveScrub}
-      onPointerUp={endScrub}
-      onPointerLeave={endScrub}
+      className="pf-chart"
+      style={{ width: "100%", touchAction: "pan-y", cursor: "crosshair", ...NO_SELECT }}
+      onContextMenu={(e) => e.preventDefault()}
+      {...handlers}
     >
       <rect data-bg="1" x="0" y="0" width={W} height={H} fill="transparent" />
       <defs>
@@ -482,103 +1304,157 @@ function PortfolioChart({ rows, color, onScrub, onSwipeStart, onSwipeMove, onSwi
           <polygon points={areaPts} />
         </clipPath>
       </defs>
-      {[0.2, 0.4, 0.6, 0.8].map((t, i) => (
-        <line key={i} x1={padL} y1={padT + t * (H - padT - padB)} x2={W - padR} y2={padT + t * (H - padT - padB)} stroke="var(--border)" strokeWidth="1" opacity="0.5" />
+      <line x1={padL} y1={y(0)} x2={W - padR} y2={y(0)} stroke="var(--text-secondary)" strokeWidth="1" strokeDasharray="2,4" opacity="0.7" />
+      {maRuns.map((run, i) => (
+        <polyline key={i} points={run.join(" ")} fill="none" stroke="var(--ma)" strokeWidth="1.5" strokeDasharray="1,3" strokeLinecap="round" strokeLinejoin="round" opacity="0.8" />
       ))}
-      <g clipPath="url(#portfolioAreaClip)" mask="url(#portfolioFadeMask)">
-        <rect x="0" y="0" width={W} height={H} fill="url(#portfolioDots)" />
-      </g>
-      <line x1={padL} y1={avgY} x2={W - padR} y2={avgY} stroke="#ffffff" strokeWidth="1.25" strokeDasharray="1,3" strokeLinecap="round" opacity="0.65" />
-      <polyline points={pts} fill="none" stroke={color} strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" />
+      <polyline points={pts} pathLength="1" className={introRef.current ? "pf-line pf-line-intro" : "pf-line"} fill="none" stroke={color} strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" />
       {active && (
         <g>
           <line x1={active.x} y1={padT} x2={active.x} y2={H} stroke={color} strokeWidth="1" opacity="0.35" strokeDasharray="3,3" />
-          <circle cx={active.x} cy={active.y} r={6} fill={color} stroke="var(--ink)" strokeWidth="2" />
+          <circle cx={active.x} cy={active.y} r={6} fill={color} stroke="var(--bg)" strokeWidth="2" />
           <circle cx={active.x} cy={active.y} r={10} fill="none" stroke={color} strokeWidth="1.5" opacity="0.5" />
         </g>
       )}
     </svg>
+    </>
   );
 }
 
 function RadarChart({ data, rangeLabel, onTap }) {
-  // data: [{ label, value, hasData }] — value is % growth, can be negative
-  const W = 320, H = 260, cx = 160, cy = 130, outerR = 90;
-  const n = data.length;
+  // Horizontal bars, one per muscle group: green up, red down, from a zero line. Label, bar and value sit close together and the group is centered in the card.
+  const W = 320, rowH = 44, padT = 4, labelW = 44, valW = 46, gap = 8;
+  const H = data.length * rowH + padT * 2;
   const vals = data.map((d) => d.value);
-  const minVal = Math.min(0, ...vals);
-  const maxVal = Math.max(...vals, 5);
-  const radius = (v) => ((v - minVal) / (maxVal - minVal || 1)) * outerR;
-  const angle = (i) => (i * 2 * Math.PI) / n - Math.PI / 2;
-  const pt = (i, r) => [cx + r * Math.cos(angle(i)), cy + r * Math.sin(angle(i))];
-
-  const ringLevels = [0.25, 0.5, 0.75, 1];
-  const dataPts = data.map((d, i) => pt(i, radius(d.value)));
-  const dataPath = dataPts.map((p) => p.join(",")).join(" ");
-  const zeroR = radius(0);
-
+  const minV = Math.min(0, ...vals), maxV = Math.max(...vals, 5);
+  const barX = labelW + gap, barW = W - barX - valW - gap;
+  const sx = (v) => barX + ((v - minV) / (maxV - minV || 1)) * barW;
+  const zeroX = Math.round(sx(0) / 4) * 4;
+  const top = padT + (rowH - 22) / 2, bottom = H - padT - (rowH - 22) / 2;
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: 260, cursor: "pointer" }} onClick={onTap}>
-      {ringLevels.map((lvl, ri) => {
-        const ringPts = data.map((_, i) => pt(i, outerR * lvl).join(",")).join(" ");
-        return <polygon key={ri} points={ringPts} fill="none" stroke="var(--border)" strokeWidth="1" />;
-      })}
+    <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: H, cursor: "pointer" }} onClick={onTap} role="img" aria-label="Strength growth by category">
+      <defs>
+        <pattern id="barDotsGain" width="4" height="4" patternUnits="userSpaceOnUse"><circle cx="2" cy="2" r="1.35" fill="var(--gain)" /></pattern>
+        <pattern id="barDotsLoss" width="4" height="4" patternUnits="userSpaceOnUse"><circle cx="2" cy="2" r="1.35" fill="var(--loss)" /></pattern>
+      </defs>
       {data.map((d, i) => {
-        const [x, y] = pt(i, outerR);
-        return <line key={i} x1={cx} y1={cy} x2={x} y2={y} stroke="var(--border)" strokeWidth="1" />;
+        const y = padT + i * rowH, cy = y + rowH / 2, up = d.value >= 0;
+        const snap = (v) => Math.round(v / 4) * 4;
+        const x1 = snap(Math.min(zeroX, sx(d.value))), w = Math.max(snap(Math.abs(sx(d.value) - zeroX)), d.hasData ? 4 : 0), by = snap(cy - 12);
+        const col = up ? "var(--gain)" : "var(--loss)";
+        const endX = up ? x1 + w : x1;
+        return (
+          <g key={d.label} onClick={(ev) => { ev.stopPropagation(); if (onTap) onTap(d.id); }}>
+            <text x={labelW} y={cy} fontSize="13" fill="var(--text-primary)" textAnchor="end" dominantBaseline="central" style={{ fontFamily: "'IBM Plex Sans',-apple-system,sans-serif", fontWeight: 600 }}>{d.label}</text>
+            {d.hasData && <rect x={x1} y={by} width={w} height={24} fill={up ? "url(#barDotsGain)" : "url(#barDotsLoss)"} />}
+            <text x={up ? endX + 8 : x1 - 8} y={cy} fontSize="14" fill={d.hasData ? col : "var(--text-secondary)"} textAnchor={up ? "start" : "end"} dominantBaseline="central" style={{ fontFamily: "'IBM Plex Sans',-apple-system,sans-serif", fontWeight: 700 }}>{d.hasData ? `${up ? "+" : ""}${Math.round(d.value * 10) / 10}%` : "no data"}</text>
+          </g>
+        );
       })}
-      {zeroR > 0 && zeroR < outerR && (
-        <polygon points={data.map((_, i) => pt(i, zeroR).join(",")).join(" ")} fill="none" stroke="var(--mute)" strokeWidth="1" strokeDasharray="3,3" />
-      )}
-      <polygon points={dataPath} fill="var(--iron)" fillOpacity="0.2" stroke="var(--iron)" strokeWidth="2" strokeLinejoin="round" />
-      {dataPts.map(([x, y], i) => (
-        data[i].hasData
-          ? <circle key={i} cx={x} cy={y} r="3.5" fill="var(--iron)" />
-          : <circle key={i} cx={x} cy={y} r="4" fill="var(--ink)" stroke="var(--mute)" strokeWidth="1.5" strokeDasharray="2,2" />
-      ))}
-      {data.map((d, i) => {
-        const [lx, ly] = pt(i, outerR + 22);
-        return <text key={i} x={lx} y={ly} fontSize="10" fontWeight="700" fill="var(--chalk)" textAnchor="middle" dominantBaseline="central">{d.label}</text>;
-      })}
+      <line x1={zeroX} y1={top} x2={zeroX} y2={bottom} stroke="var(--text-secondary)" strokeWidth="1" strokeDasharray="2,3" />
     </svg>
   );
 }
 
-function VolumeBarChart({ weeks, onTapBar }) {
-  const W = 340, H = 190, padL = 34, padR = 8, padT = 10, padB = 22;
+// Line the card's faint background dots up with the chart's own dots, so both read as one grid.
+function useGridSync(svgRef, on, pitch, ox, oy) {
+  useEffect(() => {
+    const svg = svgRef.current, card = svg && svg.closest(".card");
+    if (!on || !svg || !card || !svg.getScreenCTM) return undefined;
+    const sync = () => {
+      const m = svg.getScreenCTM(); if (!m) return;
+      const pt = svg.createSVGPoint(); pt.x = ox; pt.y = oy;
+      const q = pt.matrixTransform(m), cr = card.getBoundingClientRect(), pp = pitch * m.a;
+      const mod = (v) => ((v % pp) + pp) % pp;
+      card.style.backgroundSize = `${pp}px ${pp}px`;
+      card.style.backgroundPosition = `${mod(q.x - cr.left - card.clientLeft - pp / 2)}px ${mod(q.y - cr.top - card.clientTop - pp / 2)}px`;
+    };
+    sync();
+    const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(sync) : null;
+    if (ro) { ro.observe(card); ro.observe(svg); }
+    window.addEventListener("resize", sync);
+    return () => { if (ro) ro.disconnect(); window.removeEventListener("resize", sync); card.style.backgroundSize = ""; card.style.backgroundPosition = ""; };
+  }, [on, pitch, ox, oy]);
+}
+
+// Screen pixels per SVG unit, so the bottom charts can use exactly the main graph's dot size and spacing (3.2 px apart, ~0.9 px radius).
+function useSvgScale(svgRef) {
+  const [k, setK] = useState(1.1);
+  useEffect(() => {
+    const svg = svgRef.current;
+    if (!svg || !svg.getScreenCTM) return undefined;
+    const upd = () => { const m = svg.getScreenCTM(); if (m && m.a > 0) setK(m.a); };
+    upd();
+    const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(upd) : null;
+    if (ro) ro.observe(svg);
+    window.addEventListener("resize", upd);
+    return () => { if (ro) ro.disconnect(); window.removeEventListener("resize", upd); };
+  }, []);
+  return k;
+}
+const MAIN_DOT_GAP = 3.2;
+
+function VolumeBarChart({ weeks, onTapBar, dots }) {
+  const W = 342, H = 190, padL = 34, padR = 8, padT = 10, padB = 22;
+  const svgRef = useRef(null);
+  const k = useSvgScale(svgRef);
+  const dotGap = MAIN_DOT_GAP / k, dotR = (typeof document !== "undefined" && document.documentElement.getAttribute("data-theme") === "light" ? 1.4 : 0.9) / k;
   const max = Math.max(...weeks.map((w) => w.volume), 1);
   const n = weeks.length;
   const bw = (W - padL - padR) / n - 6;
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: 200 }}>
+    <svg ref={svgRef} viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: 200, cursor: "pointer" }} onClick={() => onTapBar && onTapBar()}>
       {[0.25, 0.5, 0.75, 1].map((t, i) => {
         const yy = padT + (1 - t) * (H - padT - padB);
-        return <g key={i}><line x1={padL} y1={yy} x2={W - padR} y2={yy} stroke="var(--border)" strokeWidth="1" opacity="0.5" /><text x={2} y={yy + 3} fontSize="8" fill="var(--mute)">{Math.round((max * t) / 1000)}k</text></g>;
+        return <g key={i}><line x1={padL} y1={yy} x2={W - padR} y2={yy} stroke="var(--border)" strokeWidth="1" opacity="0.5" /><text x={2} y={yy + 3} fontSize="8" fill="var(--text-primary)">{Math.round((max * t) / 1000)}k</text></g>;
       })}
       {weeks.map((w, i) => {
         const h = (w.volume / max) * (H - padT - padB);
         const x = padL + i * ((W - padL - padR) / n) + 3;
         return <g key={i} onClick={() => onTapBar && onTapBar(w)} style={{ cursor: "pointer" }}>
           <rect x={x - 2} y={padT} width={bw + 4} height={H - padT - padB} fill="transparent" />
-          <rect x={x} y={H - padB - h} width={bw} height={h} rx="3" fill={w.isCurrent ? "#1d5f8a" : "var(--iron)"} />
-          <text x={x + bw / 2} y={H - 6} fontSize="8" fill="var(--mute)" textAnchor="middle">{w.label}</text>
+          {dots
+            ? (() => { const pt = dotGap, nc = Math.max(3, Math.floor(bw / pt) + 1), nr = Math.floor(h / pt), x0 = x + (bw - (nc - 1) * pt) / 2; const out = []; for (let r = 0; r < nr; r++) for (let c = 0; c < nc; c++) out.push(<circle key={r + "-" + c} cx={x0 + c * pt} cy={H - padB - pt / 2 - r * pt} r={dotR} fill="var(--gain)" fillOpacity={w.isCurrent ? 1 : 0.72} />); if (!nr) out.push(<circle key="z" cx={x0 + (nc - 1) * pt / 2} cy={H - padB - 2} r={dotR} fill="var(--border)" />); return out; })()
+            : <rect x={x} y={H - padB - h} width={bw} height={h} rx="3" fill="var(--gain)" fillOpacity={w.isCurrent ? 1 : 0.45} />}
+          <text x={x + bw / 2} y={H - 6} fontSize="8" fill="var(--text-primary)" textAnchor="middle">{w.label}</text>
         </g>;
       })}
     </svg>
   );
 }
 
-function ConsistencyHeatmap({ weeks, onTap }) {
-  // weeks: [[{date, count}, ...7 days], ...]
+function ConsistencyHeatmap({ weeks, onTap, dots }) {
+  const tapRef = useRef(null);
+  // weeks: [[{date, count, future}, ...7 days Monday to Sunday], ...]
   const cell = 20, gap = 4;
-  const W = weeks.length * (cell + gap);
+  const svgRef = useRef(null);
+  const k = useSvgScale(svgRef);
+  const dotGap = MAIN_DOT_GAP / k, dotR = (typeof document !== "undefined" && document.documentElement.getAttribute("data-theme") === "light" ? 1.4 : 0.9) / k;
+  const labelW = 30, DAYS = ["M", "Tu", "W", "Th", "F", "Sa", "Su"];
+  const W = weeks.length * (cell + gap) + labelW;
   const H = 7 * (cell + gap);
-  const colorFor = (count) => (count === 0 ? "var(--border)" : count === 1 ? "#7a3a10" : count === 2 ? "#b5540f" : "var(--iron)");
+  const colorFor = () => "var(--gain)";
+  const opFor = (count) => (count === 0 ? 0 : count === 1 ? 0.3 : count === 2 ? 0.6 : 1);
   return (
-    <svg viewBox={`0 0 ${W} ${H + 4}`} style={{ width: "100%", height: 220, cursor: "pointer" }} onClick={onTap}>
-      {weeks.map((week, wi) => week.map((day, di) => (
-        <rect key={`${wi}-${di}`} x={wi * (cell + gap)} y={di * (cell + gap)} width={cell} height={cell} rx="4" fill={colorFor(day.count)} />
+    <svg ref={svgRef} viewBox={`0 0 ${W} ${H + 4}`} style={{ width: "100%", height: "auto", display: "block", cursor: "pointer" }} onClick={(ev) => {
+      const el = svgRef.current; if (!el || !onTap) return;
+      const r = el.getBoundingClientRect();
+      const col = Math.floor((((ev.clientX - r.left) / r.width) * W) / (cell + gap)), row = Math.floor((((ev.clientY - r.top) / r.height) * (H + 4)) / (cell + gap));
+      const day = col >= 0 && col < weeks.length && row >= 0 && row < 7 ? weeks[col][row] : null;
+      onTap(day && !day.future ? day.date : null);
+    }}>
+      {dots ? weeks.map((week, wi) => week.map((day, di) => {
+        // Each day is a small square of the same tiny dots as the main graph: a trained day is filled, a rest day is faint.
+        const pt = dotGap, N = Math.max(3, Math.round(cell / pt)), x0 = wi * (cell + gap) + (cell - (N - 1) * pt) / 2, y0 = di * (cell + gap) + (cell - (N - 1) * pt) / 2, out = [];
+        const on = !day.future && day.count > 0;
+        for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) {
+          out.push(<circle key={`${wi}-${di}-${r}${c}`} cx={x0 + c * pt} cy={y0 + r * pt} r={on ? dotR : dotR * 0.75} fill={on ? "var(--gain)" : "var(--border)"} opacity={on ? 1 : day.future ? 0.5 : 0.9} />);
+        }
+        return <g key={`${wi}-${di}`}>{out}</g>;
+      })) : weeks.map((week, wi) => week.map((day, di) => (
+        <rect key={`${wi}-${di}`} x={wi * (cell + gap)} y={di * (cell + gap)} width={cell} height={cell} rx="4" fill={day.future ? "none" : day.count === 0 ? "var(--border)" : colorFor(day.count)} fillOpacity={1} stroke={day.future ? "var(--border)" : "none"} strokeDasharray={day.future ? "2,3" : undefined} />
       )))}
+      {DAYS.map((d, di) => <text key={d} x={W - labelW + 6} y={di * (cell + gap) + cell / 2 + 4} fontSize="11" fill="var(--text-primary)">{d}</text>)}
     </svg>
   );
 }
@@ -595,7 +1471,7 @@ function DotField() {
     const ctx = canvas.getContext("2d");
     if (!ctx) return; // no canvas support: fall back to a plain black background
     const GRID = 16, BASE_RADIUS = 1;
-    // Tuned by eye in a real browser. A dot's colour scales from black (wave far away) up to this
+    // Tuned by eye in a real browser. A dot's color scales from black (wave far away) up to this
     // at the crest: a warm amber that stays tiny and discrete, never neon.
     const CREST = [141, 106, 53];
     const PEAK_RADIUS = 0.45;        // px a dot grows at the crest (1px -> 1.45px)
@@ -668,84 +1544,216 @@ function DotField() {
   return <canvas ref={canvasRef} className="dot-field" aria-hidden="true" />;
 }
 
+function buildDemoData() {
+  let seed = 7;
+  const rnd = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296; };
+  const plan = [
+    [0, "push", [["Bench Press", 155, 8], ["Incline Barbell Press", 115, 8], ["Barbell Shoulder Press", 85, 8]]],
+    [1, "pull", [["Deadlift", 225, 5], ["Barbell Rows", 115, 8], ["Close-Grip Lat Pulldown", 110, 10], ["Pull-Ups", 0, 6]]],
+    [3, "arms", [["Barbell Curl", 65, 10], ["Skull Crushers", 60, 10], ["Hammer Curl", 35, 10]]],
+    [4, "legsA", [["Squats", 205, 6], ["Leg Press", 320, 10], ["Romanian Deadlift", 185, 8], ["Calf Raises", 135, 15]]],
+  ];
+  const today = todayISO(), thisWeek = weekStartISO(today), out = [];
+  for (let w = 25; w >= 0; w--) {
+    plan.forEach(([dow, wid, lifts]) => {
+      const date = shiftDate(thisWeek, -w * 7 + dow);
+      if (date > today || (wid === "legsA" && w <= 1)) return;
+      lifts.forEach(([exercise, base, reps]) => {
+        const bwLift = base === 0; // bodyweight: reps climb instead of weight
+        const weight = bwLift ? 0 : Math.round((base * (1 + (25 - w) * 0.006) - (rnd() < 0.25 ? 5 : 0)) / 5) * 5;
+        const repsDone = bwLift ? reps + Math.floor((25 - w) / 4) : reps - (rnd() < 0.3 ? 1 : 0);
+        out.push({ id: `demo-${date}-${exercise}`, workoutId: wid, exercise, weight, sets: 3, reps: repsDone, date, isWarmup: false });
+      });
+    });
+  }
+  out.sort((a, b) => (a.date < b.date ? 1 : -1));
+  return { workouts: DEFAULT_WORKOUTS, exercises: DEFAULT_EXERCISES, entries: out };
+}
+
+// Spotlight tutorial: dims the screen, cuts a hole around the target and types the explanation in a bubble.
+function TutorialOverlay({ steps, idx, setIdx, onEnd, waitDone }) {
+  const step = steps[idx] || steps[0];
+  const [rect, setRect] = useState(null);
+  const [shown, setShown] = useState(0);
+  const text = step.text || "";
+  useEffect(() => { if (step.before) step.before(); setRect(null); /* eslint-disable-next-line */ }, [idx]);
+  useEffect(() => {
+    let alive = true, scrolled = false;
+    const measure = () => {
+      if (!alive) return;
+      const el = step.target ? step.target() : null;
+      if (!el) { setRect(null); return; }
+      if (!scrolled) { scrolled = true; try { el.scrollIntoView({ block: "center", behavior: "auto" }); } catch (e) { /* ignore */ } }
+      const r = el.getBoundingClientRect(), vh = window.innerHeight;
+      const top = Math.max(r.top, 6), bottom = Math.min(r.bottom, vh - 6, step.maxH ? Math.max(r.top, 6) + step.maxH : 1e9);
+      if (bottom <= top) { setRect(null); return; }
+      setRect((p) => (p && Math.abs(p.top - top) < 1 && Math.abs(p.left - r.left) < 1 && Math.abs(p.h - (bottom - top)) < 1 ? p : { top, left: r.left, w: r.width, h: bottom - top }));
+    };
+    const t0 = setTimeout(measure, 420), iv = setInterval(measure, 250);
+    return () => { alive = false; clearTimeout(t0); clearInterval(iv); };
+    // eslint-disable-next-line
+  }, [idx]);
+  useEffect(() => {
+    setShown(0);
+    const iv = setInterval(() => setShown((n) => { if (n >= text.length) { clearInterval(iv); return n; } return n + 2; }), 22);
+    return () => clearInterval(iv);
+  }, [idx, text]);
+  useEffect(() => { if (waitDone) { const t = setTimeout(() => setIdx((i) => i + 1), 350); return () => clearTimeout(t); } return undefined; }, [waitDone]);
+  const vh = typeof window !== "undefined" ? window.innerHeight : 800, vw = typeof window !== "undefined" ? window.innerWidth : 400;
+  const pad = 6;
+  const dia = rect ? Math.max(rect.w, rect.h) + pad * 2 : 0;
+  const hole = rect ? (step.round ? { top: rect.top + rect.h / 2 - dia / 2, left: rect.left + rect.w / 2 - dia / 2, width: dia, height: dia, borderRadius: "50%" } : { top: rect.top - pad, left: rect.left - pad, width: rect.w + pad * 2, height: rect.h + pad * 2 }) : null;
+  const below = hole ? vh - (hole.top + hole.height) : 0;
+  const bubbleStyle = !hole ? { top: "50%", transform: "translateY(-50%)" } : below >= 210 ? { top: hole.top + hole.height + 14 } : { bottom: vh - hole.top + 14 };
+  const last = idx === steps.length - 1, canNext = !step.wait;
+  const panel = (st, k) => <div key={k} className="tut-block" style={st} onClick={(e) => e.stopPropagation()} />;
+  return (
+    <div className="tut" role="dialog" aria-label="Tutorial">
+      {hole && <div className="tut-hole" style={hole} />}
+      {!hole && <div className="tut-dim" />}
+      {step.wait && hole
+        ? [panel({ top: 0, left: 0, right: 0, height: Math.max(0, hole.top) }, "t"), panel({ top: hole.top + hole.height, left: 0, right: 0, bottom: 0 }, "b"), panel({ top: hole.top, left: 0, width: Math.max(0, hole.left), height: hole.height }, "l"), panel({ top: hole.top, left: hole.left + hole.width, right: 0, height: hole.height }, "r")]
+        : <div className="tut-block" style={{ inset: 0 }} />}
+      <div className="tut-bubble" style={bubbleStyle} onClick={() => setShown(text.length)}>
+        <div className="tut-text">{text.slice(0, shown)}<span className="tut-caret">{shown < text.length ? "▍" : ""}</span></div>
+        <div className="tut-row">
+          <span className="tut-count">{idx + 1}/{steps.length}</span>
+          <span className="tut-btns">
+            {!last && <button type="button" className="tut-btn ghost" onClick={onEnd}>Skip</button>}
+            {idx > 0 && <button type="button" className="tut-btn ghost" onClick={(e) => { e.stopPropagation(); setIdx(idx - 1); }}>Back</button>}
+            {canNext && <button type="button" className="tut-btn" onClick={(e) => { e.stopPropagation(); if (last) onEnd(); else setIdx(idx + 1); }}>{step.next || "Next"}</button>}
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function Home() {
+  const [passcode, setPasscode] = useState(null);
+  const [passInput, setPassInput] = useState("");
+  const [authError, setAuthError] = useState(null);
 
   const [loaded, setLoaded] = useState(false);
+  const [settings, setSettings] = useState(DEFAULT_SETTINGS);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [legalDoc, setLegalDoc] = useState(null);
+  const [hexDraft, setHexDraft] = useState("");
+  const [me, setMe] = useState(null);                       // { role: "owner" | "tester", name }
+  const [feedbackText, setFeedbackText] = useState("");
+  const [feedbackStatus, setFeedbackStatus] = useState("");
+  const [feedbackList, setFeedbackList] = useState(null);
   const [workouts, setWorkouts] = useState(DEFAULT_WORKOUTS);
   const [exercises, setExercises] = useState(DEFAULT_EXERCISES);
   const [entries, setEntries] = useState([]);
   const [restDays, setRestDays] = useState([]);
   const [progressionMode, setProgressionMode] = useState("weight"); // "weight" | "reps"
+  const unit = settings.unit === "kg" ? "kg" : "lbs";
+  const W = (lbs) => (unit === "kg" ? r1(lbs * KG_PER_LB) : r1(lbs)); // pounds in, display number out
+  const Wrec = (lbs) => (unit === "kg" ? Math.round((lbs * KG_PER_LB) / 2.5) * 2.5 : lbs); // suggested weights land on plates
+  const toLbs = (v) => (unit === "kg" ? Math.round((Number(v) / KG_PER_LB) * 1000) / 1000 : Number(v));
+  const cvText = (str) => (unit === "kg" ? String(str).replace(/(\d+(?:\.\d+)?)\s*lbs?\b/g, (m, n) => `${Math.round(Number(n) * KG_PER_LB * 2) / 2} kg`) : str);
+  const [tickers, setTickers] = useState({});
+  const [restTimes, setRestTimes] = useState({});
+  const [exMeta, setExMeta] = useState({}); // { [exercise]: { brand, oneSided } }
   const [saveError, setSaveError] = useState(null);
-
-  // One-time tip on iPhone/iPad: how to put the demo on the Home Screen. Shown only in the
-  // browser (not once it's been added), and only until it's dismissed.
-  const TIP_KEY = "hooksWorkoutDemoTipDismissed";
-  const [showInstallTip, setShowInstallTip] = useState(false);
-  useEffect(() => {
-    const ua = navigator.userAgent || "";
-    const isIOS = /iPhone|iPad|iPod/.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
-    const installed = window.navigator.standalone === true || (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches);
-    let dismissed = false;
-    try { dismissed = localStorage.getItem(TIP_KEY) === "1"; } catch (e) { /* ignore */ }
-    if (isIOS && !installed && !dismissed) setShowInstallTip(true);
-  }, []);
-  const dismissInstallTip = () => {
-    setShowInstallTip(false);
-    try { localStorage.setItem(TIP_KEY, "1"); } catch (e) { /* ignore */ }
-  };
+  const [pendingSync, setPendingSync] = useState(false); // true while changes are saved on this phone but not yet on the server
 
   const [activeWorkoutId, setActiveWorkoutId] = useState("push");
   const [selectedDate, setSelectedDate] = useState(todayISO());
   const [calendarOpen, setCalendarOpen] = useState(false);
 
-  const [showWorkoutMenu, setShowWorkoutMenu] = useState(false);
-  const [newWorkoutName, setNewWorkoutName] = useState("");
 
   const [form, setForm] = useState({ exercise: "", weight: "", sets: "", reps: "", isWarmup: false });
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [addingExercise, setAddingExercise] = useState(false);
+  const editScanRef = useRef(null);
+  // "That's about 7 Ford F-150s." Facts come from lib/compare.js; the playful one-liner only shows if you turn it on in Settings.
+  const compareLine = (lbs, seed) => { const c = compareWeight(lbs, seed); return c ? `That's ${c.text}.${settings.playful && c.quip ? " " + c.quip : ""}` : null; };
   const [newExerciseName, setNewExerciseName] = useState("");
-  const [expandedExercise, setExpandedExercise] = useState(null);
-  const azRefs = useRef({});
-  const azStripRef = useRef(null);
-  const scrollToLetter = (letter) => {
-    const el = azRefs.current[letter];
-    if (el) el.scrollIntoView({ behavior: "auto", block: "start" });
-  };
-  const azPointerToLetter = (clientY) => {
-    const strip = azStripRef.current;
-    if (!strip) return null;
-    const rect = strip.getBoundingClientRect();
-    const idx = Math.min(25, Math.max(0, Math.floor(((clientY - rect.top) / rect.height) * 26)));
-    return "ABCDEFGHIJKLMNOPQRSTUVWXYZ"[idx];
-  };
-  const azDragging = useRef(false);
-  const azStart = (e) => { azDragging.current = true; const l = azPointerToLetter(e.clientY); if (l) scrollToLetter(l); };
-  const azMove = (e) => { if (azDragging.current) { const l = azPointerToLetter(e.clientY); if (l) scrollToLetter(l); } };
-  const azEnd = () => { azDragging.current = false; };
+  const [newExerciseBrand, setNewExerciseBrand] = useState("");
+  const [newExerciseTicker, setNewExerciseTicker] = useState("");
+  const [newExerciseOneSided, setNewExerciseOneSided] = useState(false);
+  const [newDayName, setNewDayName] = useState("");
+  const [newExerciseDays, setNewExerciseDays] = useState([]); // workout ids the new exercise belongs to
+  const [progQuery, setProgQuery] = useState("");   // the Progress search box (independent of the log search)
+  const [progOpen, setProgOpen] = useState(false);
+  const draftsRef = useRef({});                 // each exercise's weight / sets / reps while you move between lifts
+  const [recentExercises, setRecentExercises] = useState([]); // exercises logged this visit, newest first (for the swap button)
+  const [dupPrompt, setDupPrompt] = useState(null); // { typed, existing } when a new name looks like an existing one
+  const [restTimer, setRestTimer] = useState(null); // { total, endsAt, exercise }
+  const [restNow, setRestNow] = useState(Date.now());
 
-  const [chartScope, setChartScope] = useState("ALL");
   const [chartFocusExercise, setChartFocusExercise] = useState(null);
-  const [chartRange, setChartRange] = useState("all");
+  const [chartRange, setChartRange] = useState("3m");
   const [chartMetric, setChartMetric] = useState("weight");
 
-  // The demo has no server: it loads this device's saved copy if there is one, otherwise the
-  // seeded sample data. Each visitor's changes live only in their own browser.
+  // load saved passcode from this browser
   useEffect(() => {
-    let data = null;
-    try {
-      const raw = localStorage.getItem(DEMO_KEY);
-      if (raw) data = JSON.parse(raw);
-    } catch (e) { /* fall through to fresh sample data */ }
-    if (!data || !Array.isArray(data.entries)) data = buildDemoData();
-    setWorkouts(data.workouts || DEFAULT_WORKOUTS);
-    setExercises(data.exercises || DEFAULT_EXERCISES);
-    setEntries(data.entries);
-    setRestDays(data.restDays || []);
-    setProgressionMode(data.progressionMode || "weight");
-    setLoaded(true);
+    setPasscode("demo");
   }, []);
+
+  const loadData = async (code) => {
+    try {
+      let cached = null, pending = false;
+      try { cached = JSON.parse(localStorage.getItem(CACHE_KEY) || "null"); pending = localStorage.getItem(PENDING_KEY) === "1"; } catch (e) { /* ignore */ }
+      let data = null;
+      if (DEMO) { data = cached && cached.entries ? cached : { ...buildDemoData(), restDays: [], progressionMode: "weight", tickers: {}, restTimes: {}, exMeta: {} }; pending = false; }
+      else try {
+        const res = await fetch("/api/data", { headers: { "x-app-passcode": code } });
+        if (res.status === 401) {
+          setAuthError("Wrong passcode.");
+          localStorage.removeItem(PASSCODE_KEY);
+          setPasscode("");
+          return;
+        }
+        data = await res.json();
+      } catch (e) {
+        if (!cached) throw e; // offline and nothing saved on this phone yet
+        data = cached;
+        setPendingSync(true);
+      }
+      if (pending && cached) { data = cached; setPendingSync(true); } // this phone has newer changes than the server: keep them and send them up
+      else if (!DEMO && data && data.entries) { try { localStorage.setItem(CACHE_KEY, JSON.stringify(data)); } catch (e) { /* ignore */ } }
+      let nextWorkouts = data.workouts || DEFAULT_WORKOUTS;
+      let nextExercises = data.exercises || DEFAULT_EXERCISES;
+      let nextEntries = data.entries || [];
+      const nextRestDays = data.restDays || [];
+      const nextProgressionMode = data.progressionMode || "weight";
+
+      // One-time migration: merge the old Legs A / Legs B split into a single "Legs" workout.
+      const hasLegsB = nextWorkouts.some((w) => w.id === "legsB");
+      if (hasLegsB) {
+        nextWorkouts = nextWorkouts
+          .filter((w) => w.id !== "legsB")
+          .map((w) => (w.id === "legsA" ? { ...w, name: "Legs" } : w));
+        const mergedList = [...(nextExercises.legsA || []), ...(nextExercises.legsB || [])];
+        const deduped = [];
+        mergedList.forEach((ex) => { if (!deduped.some((d) => d.toLowerCase() === ex.toLowerCase())) deduped.push(ex); });
+        nextExercises = { ...nextExercises, legsA: deduped };
+        delete nextExercises.legsB;
+        nextEntries = nextEntries.map((e) => (e.workoutId === "legsB" ? { ...e, workoutId: "legsA" } : e));
+        if (activeWorkoutId === "legsB") setActiveWorkoutId("legsA");
+        // Save the merge immediately so it only ever needs to run once.
+        persist({ workouts: nextWorkouts, exercises: nextExercises, entries: nextEntries, restDays: nextRestDays, progressionMode: nextProgressionMode, tickers: data.tickers || {}, restTimes: data.restTimes || {}, exMeta: data.exMeta || {} });
+      }
+
+      setWorkouts(nextWorkouts);
+      setExercises(nextExercises);
+      setEntries(nextEntries);
+      setRestDays(nextRestDays);
+      setTickers(data.tickers || {});
+      setRestTimes(data.restTimes || {});
+      setExMeta(data.exMeta || {});
+      setProgressionMode(nextProgressionMode);
+      setLoaded(true);
+      setAuthError(null);
+    } catch {
+      setAuthError("Couldn't reach the server. Check your connection.");
+    }
+  };
+
+  useEffect(() => { if (passcode) loadData(passcode); }, [passcode]);
 
   // Quick-log entry point: a Home Screen bookmark or iOS Shortcut pointed at
   // ?quicklog=Exercise+Name jumps straight to the log form with that exercise pre-filled.
@@ -756,36 +1764,156 @@ export default function Home() {
     if (ql) {
       const home = findExerciseHome(ql);
       if (home) setActiveWorkoutId(home);
-      setForm((f) => ({ ...f, exercise: ql }));
+      const known = allExerciseNames.find((n) => n.toLowerCase() === ql.toLowerCase());
+      if (known) selectExercise(known); else setForm((f) => ({ ...f, exercise: ql }));
       scrollToSection("home");
     }
   }, [loaded]);
 
-  const persist = (next) => {
+  const submitPasscode = () => {
+    if (!passInput.trim()) return;
+    localStorage.setItem(PASSCODE_KEY, passInput.trim());
+    setPasscode(passInput.trim());
+  };
+
+  // ---- Look & feel: dark / light / system and one accent color, remembered on this device ----------
+  useEffect(() => {
+    try { const raw = localStorage.getItem("hooksSettings"); if (raw) { const st = JSON.parse(raw); if (st.fontV !== 2) { st.fontText = "ibm-plex-sans"; st.fontV = 2; } setSettings({ ...DEFAULT_SETTINGS, ...st, glass: true }); } } catch (e) { /* ignore */ }
+  }, []);
+  useIsoLayoutEffect(() => {
+    const mq = window.matchMedia ? window.matchMedia("(prefers-color-scheme: light)") : null;
+    const apply = () => {
+      const t = deriveTheme(settings.mode, settings.accent, mq ? mq.matches : false, settings.gl);
+      const root = document.documentElement;
+      root.setAttribute("data-theme", t.scheme);
+      Object.keys(t.vars).forEach((k) => root.style.setProperty(k, t.vars[k]));
+      const fv = deriveFonts(settings.fontText, settings.fontNum);
+      Object.keys(fv).forEach((k) => root.style.setProperty(k, fv[k]));
+      if (settings.glass) root.setAttribute("data-nav", "glass"); else root.removeAttribute("data-nav");
+      if (settings.dotNums !== false) root.setAttribute("data-dotnums", "on"); else root.removeAttribute("data-dotnums");
+      const meta = document.querySelector('meta[name="theme-color"]');
+      if (meta) meta.setAttribute("content", t.themeColor);
+      // iOS home-screen apps read this at launch: dark text on a light bar when the app is light.
+      const sb = document.querySelector('meta[name="apple-mobile-web-app-status-bar-style"]');
+      if (sb) sb.setAttribute("content", t.scheme === "light" ? "default" : "black-translucent");
+    };
+    apply();
+    if (settings.mode === "system" && mq && mq.addEventListener) { mq.addEventListener("change", apply); return () => mq.removeEventListener("change", apply); }
+    return undefined;
+  }, [settings.mode, settings.accent, settings.fontText, settings.fontNum, settings.glass, settings.gl, settings.dotNums]);
+  const updateSettings = (patch) => setSettings((cur) => {
+    const next = { ...cur, ...patch };
+    try { localStorage.setItem("hooksSettings", JSON.stringify(next)); } catch (e) { /* ignore */ }
+    return next;
+  });
+  // Browsers only allow sound after a tap, so wake the audio engine on the first touch.
+  useEffect(() => {
+    const wake = () => { unlockAudio(); window.removeEventListener("pointerdown", wake); };
+    window.addEventListener("pointerdown", wake);
+    return () => window.removeEventListener("pointerdown", wake);
+  }, []);
+  const fx = (kind) => {
+    if (kind === "click") { if (settings.sound) playClick(); if (settings.vibe) vibrate(VIBE.click); }
+    else if (kind === "warning") { if (settings.sound) playWoodTriple(); if (settings.vibe) vibrate(VIBE.warning); }
+    else if (kind === "done") { if (settings.sound) playBell(); if (settings.vibe) vibrate(VIBE.done); }
+  };
+  const authHeaders = () => ({ "x-app-passcode": passcode });
+  useEffect(() => {
+    if (!passcode) return;
+    if (DEMO) return;
+    fetch("/api/me", { headers: { "x-app-passcode": passcode } }).then((r) => (r.ok ? r.json() : null)).then((d) => { if (d) setMe(d); }).catch(() => {});
+  }, [passcode]);
+  const sendFeedback = async () => {
+    const message = feedbackText.trim();
+    if (!message) return;
+    if (DEMO) { setFeedbackText(""); setFeedbackStatus("Feedback is turned off in the demo."); return; }
+    setFeedbackStatus("Sending…");
+    try {
+      const res = await fetch("/api/feedback", { method: "POST", headers: { "Content-Type": "application/json", ...authHeaders() }, body: JSON.stringify({ message }) });
+      if (res.ok) { setFeedbackText(""); setFeedbackStatus("Sent. Thank you."); } else setFeedbackStatus(res.status === 429 ? "That's enough for today." : "Couldn't send, try again.");
+    } catch (e) { setFeedbackStatus("Couldn't send, check your connection."); }
+  };
+  const loadFeedback = async () => {
+    try {
+      const res = await fetch("/api/feedback", { headers: authHeaders() });
+      if (res.ok) setFeedbackList((await res.json()).items || []);
+    } catch (e) { /* ignore */ }
+  };
+  const signOut = () => { try { localStorage.removeItem(CACHE_KEY); localStorage.removeItem("hooksTutorialDone"); } catch (e) { /* ignore */ } window.location.reload(); };
+
+  const demoRef = useRef(false);
+  const persist = async (next) => {
+    if (demoRef.current) return;
     const payload = {
       ...next,
       restDays: next.restDays !== undefined ? next.restDays : restDays,
       progressionMode: next.progressionMode !== undefined ? next.progressionMode : progressionMode,
+      tickers: next.tickers !== undefined ? next.tickers : tickers,
+      restTimes: next.restTimes !== undefined ? next.restTimes : restTimes,
+      exMeta: next.exMeta !== undefined ? next.exMeta : exMeta,
     };
+    setTickers(payload.tickers || {});
+    setRestTimes(payload.restTimes || {});
+    setExMeta(payload.exMeta || {});
     setWorkouts(payload.workouts); setExercises(payload.exercises); setEntries(payload.entries); setRestDays(payload.restDays); setProgressionMode(payload.progressionMode);
+    // Always keep a copy on this phone first, so nothing is lost if the connection drops.
+    try { localStorage.setItem(CACHE_KEY, JSON.stringify(payload)); } catch (e) { /* ignore */ }
+  };
+  // Sends the copy saved on this phone to the server. Safe to call any time; it does nothing when there is nothing waiting.
+  const flushingRef = useRef(false);
+  const flushPending = async () => {
+    if (DEMO) return;
+    if (flushingRef.current) return;
+    let raw = null;
+    try { if (localStorage.getItem(PENDING_KEY) !== "1") { setPendingSync(false); return; } raw = localStorage.getItem(CACHE_KEY); } catch (e) { return; }
+    if (!raw || !passcode) return;
+    flushingRef.current = true;
     try {
-      localStorage.setItem(DEMO_KEY, JSON.stringify(payload));
-      setSaveError(null);
-    } catch (e) { setSaveError("Couldn't save on this device (private browsing?)."); }
+      const res = await fetch("/api/data", { method: "POST", headers: { "Content-Type": "application/json", "x-app-passcode": passcode }, body: raw });
+      if (res.ok) {
+        // If another change was saved while this one was sending, the cache is newer than what we sent: keep waiting.
+        let same = true; try { same = localStorage.getItem(CACHE_KEY) === raw; if (same) localStorage.removeItem(PENDING_KEY); } catch (e) { /* ignore */ }
+        setSaveError(null); setPendingSync(!same);
+        if (!same) { flushingRef.current = false; return flushPending(); }
+      } else setSaveError("Couldn't save to the server. Your changes are kept on this phone and will retry.");
+    } catch { /* offline: stays pending, retried automatically */ }
+    flushingRef.current = false;
   };
-
-  const resetDemo = () => {
-    if (typeof window !== "undefined" && !window.confirm("Reset the demo back to its original sample data?")) return;
-    persist(buildDemoData());
-  };
+  useEffect(() => {
+    if (!passcode || DEMO) return undefined;
+    const go = () => { flushPending(); };
+    window.addEventListener("online", go);
+    document.addEventListener("visibilitychange", go);
+    const iv = setInterval(go, 20000);
+    go();
+    return () => { window.removeEventListener("online", go); document.removeEventListener("visibilitychange", go); clearInterval(iv); };
+    // eslint-disable-next-line
+  }, [passcode, loaded]);
+  useEffect(() => { try { if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {}); } catch (e) { /* ignore */ } }, []);
+  // Apple HIG: follow the iPhone's text size setting (Dynamic Type). On iOS the system body font tells us the chosen size;
+  // we scale the root font so every rem-based size grows with it. Capped so layouts stay usable.
+  useEffect(() => {
+    let probe;
+    try {
+      if (!/iPhone|iPad|iPod/.test(navigator.userAgent)) return undefined;
+      probe = document.createElement("span");
+      probe.textContent = "x";
+      probe.style.cssText = "position:absolute;visibility:hidden;pointer-events:none;font:-apple-system-body;";
+      document.body.appendChild(probe);
+      const apply = () => {
+        const px = parseFloat(getComputedStyle(probe).fontSize) || 17;
+        const ratio = Math.min(Math.max(px / 17, 1), 1.5);
+        document.documentElement.style.fontSize = ratio === 1 ? "" : `${16 * ratio}px`;
+      };
+      apply();
+      window.addEventListener("resize", apply);
+      document.addEventListener("visibilitychange", apply);
+      return () => { window.removeEventListener("resize", apply); document.removeEventListener("visibilitychange", apply); if (probe && probe.parentNode) probe.parentNode.removeChild(probe); };
+    } catch (e) { return undefined; }
+  }, []);
 
   const setProgressionModeAndSave = (mode) => {
     persist({ workouts, exercises, entries, restDays, progressionMode: mode });
-  };
-
-  const toggleRestDay = (date) => {
-    const next = restDays.includes(date) ? restDays.filter((d) => d !== date) : [...restDays, date];
-    persist({ workouts, exercises, entries, restDays: next });
   };
 
   const activeWorkout = workouts.find((w) => w.id === activeWorkoutId) || workouts[0];
@@ -798,36 +1926,160 @@ export default function Home() {
     return Array.from(set).sort();
   }, [exercises, entries]);
 
+  // Auto tickers, made unique: a repeat gets a number on the end (BNCPR, BNCP2).
+  const autoTickers = useMemo(() => {
+    const used = new Set(Object.values(tickers || {})), map = {};
+    allExerciseNames.forEach((nm) => {
+      if (tickers && tickers[nm]) return;
+      let t = defaultTicker(nm), k = 2;
+      while (used.has(t)) { t = defaultTicker(nm).slice(0, 4) + k; k += 1; }
+      used.add(t); map[nm] = t;
+    });
+    return map;
+  }, [allExerciseNames, tickers]);
+  const tickerOf = (name) => (tickers && tickers[name]) || autoTickers[name] || defaultTicker(name);
+
+  // Matches any part of a name, in any word order. With nothing typed yet it offers the lifts you
+  // used most recently, which is what you want when you're alternating between two exercises.
   const suggestions = useMemo(() => {
-    const q = form.exercise.trim().toLowerCase();
-    if (!q) return [];
-    const starts = allExerciseNames.filter((e) => e.toLowerCase().startsWith(q));
-    const contains = allExerciseNames.filter((e) => !e.toLowerCase().startsWith(q) && e.toLowerCase().includes(q));
-    return [...starts, ...contains].slice(0, 6);
-  }, [form.exercise, allExerciseNames]);
+    const q = form.exercise.trim();
+    const freq = {};
+    entries.forEach((e) => { freq[e.exercise] = (freq[e.exercise] || 0) + 1; });
+    if (!q) return [...allExerciseNames].sort((a, b) => (freq[b] || 0) - (freq[a] || 0)).slice(0, 6);
+    if (allExerciseNames.some((n) => n.toLowerCase() === q.toLowerCase())) return [];
+    return searchExercises(q, allExerciseNames, 8, freq);
+  }, [form.exercise, allExerciseNames, entries]);
+  const displayEx = (n) => (exMeta[n] && exMeta[n].brand ? `${n} · ${exMeta[n].brand}` : n);
 
-  const createWorkout = () => {
-    const name = newWorkoutName.trim();
-    if (!name) return;
-    const id = `w-${Date.now()}`;
-    persist({ workouts: [...workouts, { id, name }], exercises: { ...exercises, [id]: [] }, entries });
-    setActiveWorkoutId(id); setNewWorkoutName(""); setShowWorkoutMenu(false);
-  };
-
-  const addExerciseToList = (name, workoutId = activeWorkoutId) => {
+  // Adding a name that looks like one you already have ("Calf Raise" vs "Calf Raises") asks first.
+  // An exercise can belong to several days; each day it's ticked for lists it.
+  const addExerciseToList = (name, dayIds, force = false, brand = "") => {
     const trimmed = name.trim();
-    if (!trimmed) return;
-    const list = exercises[workoutId] || [];
-    if (list.some((e) => e.toLowerCase() === trimmed.toLowerCase())) return;
-    persist({ workouts, exercises: { ...exercises, [workoutId]: [...list, trimmed] }, entries });
+    const brandT = (brand || "").trim();
+    if (!trimmed || !dayIds.length) return false;
+    const exact = allExerciseNames.find((n) => n.toLowerCase() === trimmed.toLowerCase());
+    if (exact && brandT && !force && ((exMeta[exact] && exMeta[exact].brand) || "").toLowerCase() !== brandT.toLowerCase()) {
+      setDupPrompt({ typed: trimmed, existing: exact, kind: "brand", brand: brandT, days: dayIds });
+      return false;
+    }
+    if (!force) {
+      const similar = findSimilarExercise(trimmed, allExerciseNames);
+      if (similar) { setDupPrompt({ typed: trimmed, existing: similar, kind: "add", days: dayIds }); return false; }
+    }
+    const nextEx = { ...exercises };
+    dayIds.forEach((id) => {
+      const list = nextEx[id] || [];
+      if (!list.some((e) => e.toLowerCase() === trimmed.toLowerCase())) nextEx[id] = [...list, trimmed];
+    });
+    const tk = newExerciseTicker.trim().toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 5);
+    const key = exact || trimmed;
+    const metaNext = { ...exMeta };
+    if (brandT || newExerciseOneSided) metaNext[key] = { ...(metaNext[key] || {}), ...(brandT ? { brand: brandT } : {}), ...(newExerciseOneSided ? { oneSided: true } : {}) };
+    persist({ workouts, exercises: nextEx, entries, tickers: tk ? { ...tickers, [trimmed]: tk } : tickers, exMeta: metaNext });
+    setActiveWorkoutId(dayIds[0]);
+    selectExercise(key);
+    return true;
   };
-
-  const removeExerciseFromList = (name, workoutId) => {
-    const ok = confirm(`Remove "${name}" from this workout's list? Your logged history for it stays intact — it just won't show up here or in autocomplete anymore.`);
-    if (!ok) return;
-    const list = exercises[workoutId] || [];
-    persist({ workouts, exercises: { ...exercises, [workoutId]: list.filter((e) => e.toLowerCase() !== name.toLowerCase()) }, entries });
+  // Custom training days: any name, same tracking as Push / Pull / Legs.
+  const addDay = (nameRaw) => {
+    const nm = (nameRaw || "").trim().slice(0, 20);
+    if (!nm) return null;
+    const hit = workouts.find((w) => w.name.toLowerCase() === nm.toLowerCase());
+    if (hit) return hit.id;
+    const id = "d" + Date.now().toString(36);
+    persist({ workouts: [...workouts, { id, name: nm }], exercises: { ...exercises, [id]: [] }, entries });
+    return id;
   };
+  // Camera: photo of workout notes becomes a list of sets to check and save.
+  const notesInputRef = useRef(null);
+  const [notesOpen, setNotesOpen] = useState(false);
+  const [notesBusy, setNotesBusy] = useState(false);
+  const [notesMsg, setNotesMsg] = useState("");
+  const [notesRows, setNotesRows] = useState([]);
+  const [notesDate, setNotesDate] = useState("");
+  const [notesDay, setNotesDay] = useState("");
+  const [notesToast, setNotesToast] = useState("");
+  const scanNotes = async (file) => {
+    if (!file) return;
+    if (DEMO) { setNotesOpen(true); setNotesBusy(false); setNotesRows([]); setNotesMsg("The notes camera is turned off in the demo."); return; }
+    setNotesOpen(true); setNotesBusy(true); setNotesMsg("Reading your notes…"); setNotesRows([]);
+    setNotesDate(todayISO()); setNotesDay(activeWorkoutId || (workouts[0] && workouts[0].id) || "");
+    try {
+      const image = await shrinkImage(file, 1600, 0.85);
+      const res = await fetch("/api/notes", { method: "POST", headers: { "Content-Type": "application/json", ...authHeaders() }, body: JSON.stringify({ image, mediaType: "image/jpeg", known: allExerciseNames, unit }) });
+      if (res.status === 429) { setNotesMsg("That's enough note photos for today."); return; }
+      if (res.status === 401) { setNotesMsg("Please sign in again, then retry."); return; }
+      if (!res.ok) { setNotesMsg(`Notes camera isn't available right now (${await apiWhy(res)}).`); return; }
+      const out = await res.json();
+      if (out.disabled) { setNotesMsg("Notes camera is turned off."); return; }
+      if (!out.lines || !out.lines.length) { setNotesMsg("Couldn't find any sets. Try a closer, brighter photo."); return; }
+      const noteUnit = out.unit || unit;
+      setNotesRows(out.lines.map((l, i) => ({ id: i, exercise: l.exercise, match: !!l.match, weight: String(noteUnit === unit ? l.weight : noteUnit === "kg" ? Math.round(l.weight * 2.20462 * 10) / 10 : Math.round(l.weight / 2.20462 * 10) / 10), reps: String(l.reps), sets: String(l.sets), warmup: !!l.warmup, sure: l.sure, raw: l.raw, keep: true })));
+      if (out.date && out.date <= todayISO()) setNotesDate(out.date);
+      setNotesMsg(out.date ? `Date on the page: ${fmtDate(out.date)}. Check everything, then save.` : "Check every line, then save.");
+    } catch (e) { setNotesMsg("Couldn't read that photo. Try again."); }
+    finally { setNotesBusy(false); if (notesInputRef.current) notesInputRef.current.value = ""; }
+  };
+  const saveNotes = () => {
+    const rows = notesRows.filter((r) => r.keep && r.exercise.trim() && r.weight !== "" && !isNaN(parseFloat(r.weight)));
+    if (!rows.length) return;
+    const nextEx = { ...exercises };
+    const made = rows.map((r, i) => {
+      const typed = r.exercise.trim();
+      const canon = allExerciseNames.find((n) => n.toLowerCase() === typed.toLowerCase()) || typed;
+      const home = findExerciseHome(canon) || notesDay || activeWorkoutId;
+      const list = nextEx[home] || [];
+      if (!list.some((e) => e.toLowerCase() === canon.toLowerCase())) nextEx[home] = [...list, canon];
+      return { id: `${Date.now()}-${i}-${Math.random().toString(36).slice(2, 6)}`, workoutId: home, exercise: canon, weight: toLbs(r.weight), sets: Math.max(1, Number(r.sets) || 1), reps: Math.max(0, Number(r.reps) || 0), date: notesDate || todayISO(), isWarmup: !!r.warmup };
+    });
+    persist({ workouts, exercises: nextEx, entries: [...made.slice().reverse(), ...entries] });
+    fx("click");
+    setNotesOpen(false); setNotesRows([]);
+    setNotesToast(`Saved ${made.length} ${made.length === 1 ? "set" : "sets"}`);
+    setTimeout(() => setNotesToast(""), 3500);
+  };
+  const setNotesRow = (id, patch) => setNotesRows((rs) => rs.map((r) => (r.id === id ? { ...r, ...patch } : r)));
+  // Camera: photo of a machine's nameplate fills in the new-exercise form for the user to check.
+  const scanInputRef = useRef(null);
+  const [scanMsg, setScanMsg] = useState("");
+  const [scanBusy, setScanBusy] = useState(false);
+  const shrinkImage = (file, maxDim = 1280, quality = 0.8) => new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file), img = new Image();
+    img.onload = () => {
+      const scale = Math.min(1, maxDim / Math.max(img.width, img.height)), w = Math.round(img.width * scale), h = Math.round(img.height * scale);
+      const cv = document.createElement("canvas"); cv.width = w; cv.height = h;
+      cv.getContext("2d").drawImage(img, 0, 0, w, h);
+      URL.revokeObjectURL(url);
+      resolve(cv.toDataURL("image/jpeg", quality).split(",")[1]);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("bad image")); };
+    img.src = url;
+  });
+  const apiWhy = async (res) => { let j = null; try { j = await res.json(); } catch (e) { /* ignore */ } const bits = [res.status, j && j.error, j && j.upstream ? `upstream ${j.upstream}` : "", j && j.detail ? String(j.detail).replace(/\s+/g, " ").slice(0, 120) : ""].filter(Boolean); return bits.join(" · "); };
+  const scanMachine = async (file, forEdit = false) => {
+    if (!file) return;
+    if (DEMO) { setScanMsg("The camera is turned off in the demo. Type the name instead."); return; }
+    setScanBusy(true); setScanMsg("Reading the machine…");
+    try {
+      const image = await shrinkImage(file);
+      const res = await fetch("/api/identify", { method: "POST", headers: { "Content-Type": "application/json", ...authHeaders() }, body: JSON.stringify({ image, mediaType: "image/jpeg" }) });
+      if (res.status === 429) { setScanMsg("That's enough photos for today."); return; }
+      if (res.status === 401) { setScanMsg("Please sign in again, then retry."); return; }
+      if (!res.ok) { setScanMsg(`Camera isn't available right now (${await apiWhy(res)}). Type the name instead.`); return; }
+      const out = await res.json();
+      if (out.disabled) { setScanMsg("Camera is turned off. Type the name instead."); return; }
+      if (!out.found) { setScanMsg("Couldn't read a machine name. Try the placard close up, or type it."); return; }
+      if (forEdit) { setEditEx((prev) => (prev ? { ...prev, name: out.name, brand: out.brand || prev.brand, err: "" } : prev)); setScanMsg("Read from your photo. Check the name and brand, then save."); return; }
+      setNewExerciseName(out.name);
+      setNewExerciseBrand(out.brand || "");
+      const m = { push: "push", pull: "pull", legs: "leg", arms: "arm", core: "core" }[out.muscle];
+      const match = m ? workouts.filter((w) => w.name.toLowerCase().includes(m)).map((w) => w.id) : [];
+      if (match.length) setNewExerciseDays(match);
+      setScanMsg("Read from your photo. Check the name, brand and day, then add it.");
+    } catch (e) { setScanMsg("Couldn't read that photo. Try again or type the name."); }
+    finally { setScanBusy(false); if (scanInputRef.current) scanInputRef.current.value = ""; if (editScanRef.current) editScanRef.current.value = ""; }
+  };
+  const resetAddForm = () => { setAddingExercise(false); setNewExerciseName(""); setNewExerciseBrand(""); setNewExerciseTicker(""); setNewExerciseOneSided(false); setNewDayName(""); setNewExerciseDays([]); setScanMsg(""); };
 
   // Which workout an exercise "lives in" is decided by where it's already listed, not by
   // whichever tab happens to be open — so logging a Squat always files as Legs regardless
@@ -840,45 +2092,6 @@ export default function Home() {
     return null;
   };
 
-  const submitSet = () => {
-    const exerciseName = form.exercise.trim();
-    if (!exerciseName || !form.weight) return;
-    const homeWorkoutId = findExerciseHome(exerciseName) || activeWorkoutId;
-    const entry = { id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, workoutId: homeWorkoutId, exercise: exerciseName, weight: Number(form.weight), sets: form.sets ? Number(form.sets) : 1, reps: form.reps ? Number(form.reps) : 0, date: selectedDate, isWarmup: !!form.isWarmup };
-    const list = exercises[homeWorkoutId] || [];
-    const nextExercises = list.some((e) => e.toLowerCase() === exerciseName.toLowerCase()) ? exercises : { ...exercises, [homeWorkoutId]: [...list, exerciseName] };
-    persist({ workouts, exercises: nextExercises, entries: [entry, ...entries] });
-    setForm((f) => ({ ...f, isWarmup: false }));
-    setShowSuggestions(false);
-  };
-
-  const bumpForm = (key, delta) => setForm((f) => {
-    const cur = parseFloat(f[key]);
-    const next = Math.max(0, Math.round(((isNaN(cur) ? 0 : cur) + delta) * 100) / 100);
-    return { ...f, [key]: String(next) };
-  });
-
-  const clearForm = () => { setForm({ exercise: "", weight: "", sets: "", reps: "", isWarmup: false }); setShowSuggestions(false); };
-
-  const deleteEntry = (id) => persist({ workouts, exercises, entries: entries.filter((e) => e.id !== id) });
-  const toggleWarmup = (id) => persist({ workouts, exercises, entries: entries.map((e) => (e.id === id ? { ...e, isWarmup: !e.isWarmup } : e)) });
-
-  const [editingId, setEditingId] = useState(null);
-  const [showTodaysLog, setShowTodaysLog] = useState(false);
-  const [editForm, setEditForm] = useState({ weight: "", reps: "", sets: "" });
-  const startEdit = (entry) => { setEditingId(entry.id); setEditForm({ weight: String(entry.weight), reps: String(entry.reps), sets: String(entry.sets) }); };
-  const cancelEdit = () => setEditingId(null);
-  const saveEdit = (id) => {
-    if (!editForm.weight) return;
-    persist({
-      workouts, exercises,
-      entries: entries.map((e) => (e.id === id
-        ? { ...e, weight: Number(editForm.weight), reps: editForm.reps ? Number(editForm.reps) : 0, sets: editForm.sets ? Number(editForm.sets) : 1 }
-        : e)),
-    });
-    setEditingId(null);
-  };
-
   const entriesByExercise = useMemo(() => {
     const map = {};
     for (const e of entries) (map[e.exercise] = map[e.exercise] || []).push(e);
@@ -886,84 +2099,456 @@ export default function Home() {
     return map;
   }, [entries]);
 
-  // Warm-up sets are real reps, but they're not a signal of strength — every recommendation,
-  // chart, and "best lift" calculation should ignore them so a light warm-up entry never gets
-  // mistaken for a real top set or a plateau.
-  const strengthEntries = useMemo(() => entries.filter((e) => !e.isWarmup), [entries]);
+  // Exercises logged with no added weight or with assist (minus) weight: pull-ups, dips, push-ups.
+  const bwNames = useMemo(() => {
+    const set = new Set();
+    entries.forEach((e) => { if (!e.isWarmup && !(e.weight > 0)) set.add(e.exercise); });
+    return set;
+  }, [entries]);
+  const canGoNegative = (name) => !!name && (bwNames.has(name) || /pull|chin|dip|push|assist/i.test(name));
+
+  // Warm-up sets are real reps, but they're not a signal of strength: every recommendation, chart,
+  // and "best lift" calculation ignores them so a light warm-up never gets mistaken for a top set.
+  // strengthEntries feeds the Home numbers, digest and carousel. Bodyweight lifts count as body weight plus
+  // added (or minus assist); with no body weight saved they are left out so a 0 never skews a total.
+  const strengthEntries = useMemo(() => entries.filter((e) => !e.isWarmup).flatMap((e) => {
+    if (!bwNames.has(e.exercise)) return [e];
+    const bwt = settings.bodyWeight || 0;
+    return bwt > 0 ? [{ ...e, bw: true, added: e.weight || 0, weight: Math.max(5, (e.weight || 0) + bwt) }] : [];
+  }), [entries, bwNames, settings.bodyWeight]);
   const entriesByExerciseStrength = useMemo(() => {
     const map = {};
     for (const e of strengthEntries) (map[e.exercise] = map[e.exercise] || []).push(e);
     Object.values(map).forEach((l) => l.sort((a, b) => (a.date < b.date ? 1 : -1)));
     return map;
   }, [strengthEntries]);
+  // Raw working sets (weight as logged: 0 for bodyweight, negative for assist). Recommendations read these.
+  const entriesByExerciseRaw = useMemo(() => {
+    const map = {};
+    for (const e of entries) if (!e.isWarmup) (map[e.exercise] = map[e.exercise] || []).push(e);
+    Object.values(map).forEach((l) => l.sort((a, b) => (a.date < b.date ? 1 : -1)));
+    return map;
+  }, [entries]);
 
-  // Today's log shows everything logged today, regardless of which workout tab is open —
-  // matches the fact that which workout a set belongs to no longer depends on the active tab.
   const todaysEntries = entries.filter((e) => e.date === selectedDate);
 
-  const tickerScope = "ALL"; // the ticker always shows every exercise
-  const tickerSeries = useMemo(() => {
-    const scopeExercises = tickerScope === "ALL" ? allExerciseNames : (exercises[tickerScope] || []);
-    const list = scopeExercises.map((ex) => {
-      const hist = entriesByExerciseStrength[ex] || [];
-      const byDate = {};
-      hist.forEach((e) => { const cur = byDate[e.date]; if (!cur || e.weight > cur.weight) byDate[e.date] = e; });
-      const dates = Object.keys(byDate).sort();
-      const points = dates.map((d) => ({ date: d, e1rm: estE1RM(byDate[d].weight, byDate[d].reps), weight: byDate[d].weight, reps: byDate[d].reps }));
-      return { exercise: ex, points };
-    }).filter((s) => s.points.length >= 3);
-    list.sort((a, b) => b.points.length - a.points.length);
-    return list.slice(0, 12);
-  }, [tickerScope, exercises, allExerciseNames, entriesByExerciseStrength]);
+  // ---- Recommendation for one exercise ------------------------------------------------------------
+  // Sets you're logging right now never change what's recommended for the rest of today's session;
+  // only completed earlier sessions count. Once today becomes "yesterday" it becomes the new basis.
+  const buildRecommendation = (name, setCount, mWeight, mReps, sideArg) => {
+    if (!name) return null;
+    const sideNow = sideArg || logSide;
+    const fullHist = oneSidedNow(name) && entriesByExerciseRaw[name] ? entriesByExerciseRaw[name].filter((e) => !e.side || e.side === sideNow) : entriesByExerciseRaw[name];
+    const priorHist = fullHist ? fullHist.filter((e) => e.date < todayISO()) : fullHist;
+    const hist = priorHist && priorHist.length ? priorHist : fullHist;
+    const hasManual = mWeight && mReps;
+    if ((!hist || !hist.length) && !hasManual) return { noData: true };
 
-  const [portfolioRange, setPortfolioRange] = useState("all");
+    let nextTopWeight, note, lastTop, lastSessionDate, basedOnActualSets = false, setWeights = null;
+    let repLow = REC_LOW, repHigh = REC_HIGH, defaultSets = 3, fromManual = false;
+    const plan = hist && hist.length ? planNext(hist, progressionMode, todayISO()) : null;
+
+    if (plan) {
+      ({ nextTopWeight, note, lastTop, lastSessionDate, basedOnActualSets, setWeights, repLow, repHigh, defaultSets } = plan);
+    } else if (hist && hist.length) {
+      // Only heavy low-rep attempts on record: back-calculate a weight for an 8-rep set from the
+      // best estimated max instead of prescribing the max itself.
+      const bestEntry = hist.reduce((best, e) => (e1(e) > e1(best) ? e : best), hist[0]);
+      const e1rm = e1(bestEntry);
+      nextTopWeight = roundTo5(e1rm / (1 + REC_LOW / 30));
+      lastTop = bestEntry;
+      lastSessionDate = bestEntry.date;
+      note = `Only low-rep attempts logged so far (best: ${bestEntry.weight} lbs × ${bestEntry.reps}), so this weight is back-calculated from your estimated max. Treat it as a first guess and adjust by feel.`;
+    } else {
+      const w = Number(mWeight), r = Number(mReps);
+      nextTopWeight = roundTo5(estE1RM(w, r) / (1 + REC_LOW / 30));
+      lastTop = { weight: w, reps: r };
+      lastSessionDate = null;
+      fromManual = true;
+      note = `Based on the strongest set you entered (${w} lbs × ${r}). There's no logged history yet, so this is a first estimate.`;
+    }
+
+    const pcts = basedOnActualSets && setWeights && setWeights[0] ? setWeights.map((w) => w / setWeights[0]) : [1, 0.9, 0.85, 0.8, 0.75, 0.7];
+    const rows = Array.from({ length: setCount }, (_, i) => {
+      const pct = pcts[i] !== undefined ? pcts[i] : pcts[pcts.length - 1];
+      return { set: i + 1, weight: nextTopWeight <= 0 ? nextTopWeight : Math.round((nextTopWeight * pct) / 5) * 5 };
+    });
+    return { noData: false, lastTop, lastSessionDate, nextTopWeight, note, rows, repLow, repHigh, basedOnActualSets, fromManual, defaultSets };
+  };
+
+  const prefillFor = (name, side) => {
+    const rec = buildRecommendation(name, 1, "", "", side);
+    if (!rec || rec.noData) return { weight: "", sets: "", reps: "" };
+    return { weight: String(Wrec(rec.nextTopWeight)), sets: String(rec.defaultSets), reps: String(rec.repLow) };
+  };
+
+  const [recExercise, setRecExercise] = useState(null);
+  const [logSide, setLogSide] = useState("L");
+  const oneSidedNow = (n) => !!(n && exMeta[n] && exMeta[n].oneSided);
+  const barbellNow = (n) => !!n && (exMeta[n] && typeof exMeta[n].barbell === "boolean" ? exMeta[n].barbell : guessBarbell(n));
+  const [manualWeight, setManualWeight] = useState("");
+  const [manualReps, setManualReps] = useState("");
+  // The plan always lays out at least 4 working sets; the Sets box only says how many you log per entry.
+  const recSetCount = 4;
+  const recommendation = useMemo(
+    () => buildRecommendation(recExercise, recSetCount, manualWeight ? String(toLbs(manualWeight)) : "", manualReps),
+    [recExercise, recSetCount, entriesByExerciseRaw, manualWeight, manualReps, progressionMode, unit, logSide, exMeta]
+  );
+
+  // Picking an exercise (from the list, the search box or the swap button) stashes whatever is in
+  // the weight / sets / reps boxes for the one you're leaving and restores them when you come back,
+  // so supersetting two lifts never means retyping. A lift with no stash yet is pre-filled from its
+  // recommendation.
+  const selectExercise = (name) => {
+    const cur = form.exercise.trim();
+    if (cur && cur !== name) draftsRef.current[cur] = { weight: form.weight, sets: form.sets, reps: form.reps };
+    const draft = draftsRef.current[name] || prefillFor(name);
+    setForm({ exercise: name, weight: draft.weight, sets: draft.sets, reps: draft.reps, isWarmup: false });
+    setRecExercise(name);
+    setManualWeight(""); setManualReps("");
+    setShowSuggestions(false);
+    setDupPrompt(null);
+    setRecentExercises((r) => [name, ...r.filter((n) => n !== name)].slice(0, 8));
+    // The log search drives the Progress chart (one way: browsing Progress never changes the log).
+    if ((entriesByExercise[name] || []).length) { setProgCleared(false); setChartFocusExercise(name); setHistoryAll(false); setEditingId(null); setMergeOpen(false); }
+    const home = findExerciseHome(name);
+    if (home) setActiveWorkoutId(home);
+  };
+  const swapTarget = recentExercises.find((n) => n !== form.exercise.trim()) || null;
+
+  const startRest = (name) => {
+    const total = (restTimes && restTimes[name]) || restSecondsFor(name);
+    setRestTimer({ total, endsAt: Date.now() + total * 1000, exercise: name, done: false, warned: false });
+  };
+  useEffect(() => {
+    if (!restTimer) return undefined;
+    setRestNow(Date.now());
+    const id = setInterval(() => setRestNow(Date.now()), 500);
+    return () => clearInterval(id);
+  }, [restTimer && restTimer.endsAt]);
+  const restRemaining = restTimer ? Math.ceil((restTimer.endsAt - restNow) / 1000) : 0;
+  useEffect(() => {
+    if (!restTimer) return;
+    // Ten seconds out: three slow wood-block knocks (and three slow pulses where the phone allows).
+    if (restRemaining <= 10 && restRemaining > 0 && !restTimer.warned && restTimer.total > 10) {
+      fx("warning");
+      setRestTimer((t) => (t ? { ...t, warned: true } : t));
+    }
+    if (restRemaining <= 0 && !restTimer.done) {
+      fx("done");
+      setRestTimer((t) => (t ? { ...t, done: true } : t));
+    }
+    if (restRemaining <= -45) setRestTimer(null);
+  }, [restRemaining]);
+  const changeUnit = (u) => {
+    if (u === unit) return;
+    const lbsNow = form.weight !== "" && !isNaN(Number(form.weight)) ? toLbs(form.weight) : null;
+    draftsRef.current = {};
+    setManualWeight(""); setEditingId(null);
+    updateSettings({ unit: u });
+    if (lbsNow !== null) setForm((f) => ({ ...f, weight: String(u === "kg" ? r1(lbsNow * KG_PER_LB) : r1(lbsNow)) }));
+  };
+  const nudgeRest = (secs) => {
+    if (!restTimer) return;
+    const total = Math.max(15, restTimer.total + secs);
+    setRestTimer((t) => (t ? { ...t, endsAt: t.endsAt + secs * 1000, total, done: false, warned: false } : t));
+    // Remember it: the next rest for this exercise starts at the length you settled on.
+    persist({ workouts, exercises, entries, restTimes: { ...restTimes, [restTimer.exercise]: total } });
+  };
+
+  // ---- Logging -------------------------------------------------------------------------------------
+  const submitSet = (nameOverride, skipDupCheck) => {
+    const exerciseName = (nameOverride || form.exercise).trim();
+    if (!exerciseName || !form.weight) return;
+    if (!skipDupCheck && !allExerciseNames.some((n) => n.toLowerCase() === exerciseName.toLowerCase()) && !findSimilarExercise(exerciseName, allExerciseNames)) {
+      // A brand-new lift needs its day(s) first, so open the add form with the name filled in.
+      setAddingExercise(true); setNewExerciseName(exerciseName); setNewExerciseDays([]);
+      return;
+    }
+    if (!skipDupCheck) {
+      const similar = findSimilarExercise(exerciseName, allExerciseNames);
+      if (similar) { setDupPrompt({ typed: exerciseName, existing: similar, kind: "log" }); return; }
+    }
+    const homeWorkoutId = findExerciseHome(exerciseName) || activeWorkoutId;
+    const entry = { id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, workoutId: homeWorkoutId, exercise: exerciseName, weight: toLbs(form.weight), sets: 1, reps: form.reps ? Number(form.reps) : 0, date: selectedDate, isWarmup: !!form.isWarmup, ...(oneSidedNow(exerciseName) ? { side: logSide } : {}), ...(exMeta[exerciseName] && exMeta[exerciseName].brand ? { brand: exMeta[exerciseName].brand } : {}) };
+    const list = exercises[homeWorkoutId] || [];
+    const nextExercises = list.some((e) => e.toLowerCase() === exerciseName.toLowerCase()) ? exercises : { ...exercises, [homeWorkoutId]: [...list, exerciseName] };
+    persist({ workouts, exercises: nextExercises, entries: [entry, ...entries] });
+    draftsRef.current[exerciseName] = { weight: form.weight, sets: form.sets, reps: form.reps };
+    setRecentExercises((r) => [exerciseName, ...r.filter((n) => n !== exerciseName)].slice(0, 8));
+    fx("click");
+    { const n = entries.filter((e) => e.exercise === exerciseName && e.date === selectedDate).length + 1; setFillSlip({ name: exerciseName, line: `${fmtNum(W(entry.weight))} ${unit} x ${entry.reps}`, n }); clearTimeout(fillTimer.current); fillTimer.current = setTimeout(() => setFillSlip(null), 3200); }
+    if (!form.isWarmup) startRest(exerciseName);
+    setForm((f) => ({ ...f, exercise: exerciseName, isWarmup: false }));
+    if (allExerciseNames.some((n) => n.toLowerCase() === exerciseName.toLowerCase()) || nextExercises !== exercises) setRecExercise(exerciseName);
+    setShowSuggestions(false);
+    setDupPrompt(null);
+  };
+
+  const bumpForm = (key, delta) => setForm((f) => {
+    const cur = parseFloat(f[key]);
+    const floor = key === "weight" && canGoNegative(f.exercise.trim()) ? -999 : 0;
+    const next = Math.max(floor, Math.round(((isNaN(cur) ? 0 : cur) + delta) * 100) / 100);
+    return { ...f, [key]: String(next) };
+  });
+
+  const clearForm = () => { setForm({ exercise: "", weight: "", sets: "", reps: "", isWarmup: false }); setRecExercise(null); setManualWeight(""); setManualReps(""); setShowSuggestions(false); setDupPrompt(null); };
+
+  const deleteEntry = (id) => {
+    const index = entries.findIndex((e) => e.id === id);
+    if (index === -1) return;
+    const entry = entries[index];
+    persist({ workouts, exercises, entries: entries.filter((e) => e.id !== id) });
+    setUndoDel({ entry, index });
+    if (undoTimer.current) clearTimeout(undoTimer.current);
+    undoTimer.current = setTimeout(() => setUndoDel(null), 6000);
+  };
+  const undoDelete = () => {
+    if (!undoDel) return;
+    const next = entries.slice();
+    next.splice(Math.min(undoDel.index, next.length), 0, undoDel.entry);
+    persist({ workouts, exercises, entries: next });
+    setUndoDel(null);
+  };
+  const toggleWarmup = (id) => persist({ workouts, exercises, entries: entries.map((e) => (e.id === id ? { ...e, isWarmup: !e.isWarmup } : e)) });
+
+  const [editingId, setEditingId] = useState(null);
+  const [showTodaysLog, setShowTodaysLog] = useState(false);
+  const [editForm, setEditForm] = useState({ weight: "", reps: "", sets: "" });
+  const startEdit = (entry) => { setEditingId(entry.id); setEditForm({ weight: String(W(entry.bw ? entry.added : entry.weight)), reps: String(entry.reps), sets: String(entry.sets) }); };
+  const cancelEdit = () => setEditingId(null);
+  const saveEdit = (id) => {
+    if (!editForm.weight) return;
+    persist({
+      workouts, exercises,
+      entries: entries.map((e) => (e.id === id
+        ? { ...e, weight: toLbs(editForm.weight), reps: editForm.reps ? Number(editForm.reps) : 0, sets: editForm.sets ? Number(editForm.sets) : 1 }
+        : e)),
+    });
+    setEditingId(null);
+  };
+
+
+  // ---- Merge / delete an exercise (Progress section) ----------------------------------------------
+  const [mergeOpen, setMergeOpen] = useState(false);
+  const [mergeTarget, setMergeTarget] = useState("");
+  const [mergeUndo, setMergeUndo] = useState(null);
+  const [historyAll, setHistoryAll] = useState(false);
+  const mergeExercise = (from, to) => {
+    if (!from || !to || from === to) return;
+    const snapshot = { workouts, exercises, entries };
+    const toHome = findExerciseHome(to);
+    const nextEntries = entries.map((e) => (e.exercise === from ? { ...e, exercise: to, workoutId: toHome || e.workoutId } : e));
+    const nextExercises = {};
+    Object.keys(exercises).forEach((w) => { nextExercises[w] = exercises[w].filter((n) => n.toLowerCase() !== from.toLowerCase()); });
+    if (!toHome) {
+      const wid = (entries.find((e) => e.exercise === from) || {}).workoutId || activeWorkoutId;
+      nextExercises[wid] = [...(nextExercises[wid] || []), to];
+    }
+    persist({ workouts, exercises: nextExercises, entries: nextEntries });
+    setMergeUndo({ snapshot, from, to });
+    setChartFocusExercise(to);
+    setMergeOpen(false); setMergeTarget("");
+  };
+  const undoMerge = () => {
+    if (!mergeUndo) return;
+    persist(mergeUndo.snapshot);
+    setChartFocusExercise(mergeUndo.from);
+    setMergeUndo(null);
+  };
+  // ---- Edit an exercise: name, brand, one side or both, which days ----
+  const [editEx, setEditEx] = useState(null); // { orig, name, brand, oneSided, days, newDay, err }
+  const editDirty = () => !!editEx && editEx.snap !== JSON.stringify([editEx.name, editEx.brand, editEx.ticker || "", !!editEx.oneSided, !!editEx.barbell, [...editEx.days].sort()]);
+  const closeEdit = () => { if (editDirty() && !window.confirm("Discard your changes to this exercise?")) return; setEditEx(null); };
+  const closeNotes = () => { if (notesBusy) return; if (notesRows.some((r) => r.keep) && !window.confirm("Discard these lines without saving?")) return; setNotesOpen(false); setNotesRows([]); };
+  const closeTopSheetRef = useRef(null);
+  closeTopSheetRef.current = () => { if (editEx) closeEdit(); else if (notesOpen) closeNotes(); else if (legalDoc) setLegalDoc(null); else if (settingsOpen) setSettingsOpen(false); };
+  useEffect(() => { const h = (e) => { if (e.key === "Escape" && closeTopSheetRef.current) closeTopSheetRef.current(); }; window.addEventListener("keydown", h); return () => window.removeEventListener("keydown", h); }, []);
+  const openEditEx = (name) => {
+    const days = workouts.filter((w) => (exercises[w.id] || []).some((n) => n.toLowerCase() === name.toLowerCase())).map((w) => w.id);
+    const m = exMeta[name] || {};
+    setScanMsg("");
+    setEditEx({ orig: name, name, brand: m.brand || "", ticker: (tickers && tickers[name]) || "", oneSided: !!m.oneSided, barbell: barbellNow(name), days, newDay: "", err: "", snap: JSON.stringify([name, m.brand || "", (tickers && tickers[name]) || "", !!m.oneSided, !!barbellNow(name), [...days].sort()]) });
+  };
+  const saveEditEx = () => {
+    if (!editEx) return;
+    const orig = editEx.orig, nm = editEx.name.trim();
+    if (!nm) { setEditEx({ ...editEx, err: "Give it a name." }); return; }
+    if (!editEx.days.length) { setEditEx({ ...editEx, err: "Pick at least one day." }); return; }
+    if (nm.toLowerCase() !== orig.toLowerCase() && allExerciseNames.some((n) => n.toLowerCase() === nm.toLowerCase())) { setEditEx({ ...editEx, err: `You already have "${nm}". To combine two, use Merge on the Progress page.` }); return; }
+    const renamed = nm !== orig;
+    const nextExercises = {};
+    workouts.forEach((w) => {
+      let list = (exercises[w.id] || []).map((n) => (n === orig ? nm : n));
+      const has = list.some((n) => n === nm);
+      if (editEx.days.includes(w.id) && !has) list = [...list, nm];
+      if (!editEx.days.includes(w.id) && has) list = list.filter((n) => n !== nm);
+      nextExercises[w.id] = list;
+    });
+    Object.keys(exercises).forEach((k) => { if (!nextExercises[k]) nextExercises[k] = (exercises[k] || []).map((n) => (n === orig ? nm : n)); });
+    const home = editEx.days[0];
+    const nextEntries = renamed ? entries.map((e) => (e.exercise === orig ? { ...e, exercise: nm } : e)) : entries;
+    const moveKey = (obj) => { if (!renamed || !obj || obj[orig] === undefined) return obj; const o = { ...obj }; o[nm] = o[orig]; delete o[orig]; return o; };
+    const metaNext = moveKey({ ...exMeta }) || {};
+    const b = editEx.brand.trim();
+    const cur = { ...(metaNext[nm] || {}) };
+    if (b) cur.brand = b; else delete cur.brand;
+    if (editEx.oneSided) cur.oneSided = true; else delete cur.oneSided;
+    if (editEx.barbell !== guessBarbell(nm)) cur.barbell = !!editEx.barbell; else delete cur.barbell;
+    if (Object.keys(cur).length) metaNext[nm] = cur; else delete metaNext[nm];
+    const tickersNext = { ...(moveKey({ ...tickers }) || {}) };
+    const tk = String(editEx.ticker || "").trim();
+    if (tk) tickersNext[nm] = tk; else delete tickersNext[nm];
+    persist({ workouts, exercises: nextExercises, entries: nextEntries, tickers: tickersNext, restTimes: moveKey(restTimes), exMeta: metaNext });
+    if (renamed) {
+      if (draftsRef.current[orig]) { draftsRef.current[nm] = draftsRef.current[orig]; delete draftsRef.current[orig]; }
+      setRecentExercises((r) => r.map((n) => (n === orig ? nm : n)));
+      if (recExercise === orig) setRecExercise(nm);
+      if (chartFocusExercise === orig) setChartFocusExercise(nm);
+      setForm((f) => (f.exercise === orig ? { ...f, exercise: nm } : f));
+      setXpage((x) => (x && x.exercise === orig ? { ...x, exercise: nm } : x));
+    }
+    setEditEx(null);
+  };
+  // Bottom sheets: lock the page behind them and let a downward drag close them.
+  const sheetOpen = settingsOpen || !!editEx || notesOpen;
+  useEffect(() => {
+    if (!sheetOpen) return undefined;
+    const sheets = document.querySelectorAll(".sheet");
+    const sheet = sheets[sheets.length - 1];
+    if (!sheet) return undefined;
+    document.documentElement.classList.add("sheet-open");
+    let sy = 0, dy = 0, fromHead = false, active = false;
+    let hist = []; // recent {y,t} samples for release velocity
+    const backdropEl = () => { const b = document.querySelectorAll(".sheet-backdrop"); return b[b.length - 1]; };
+    const rubber = (o, dim, c = 0.55) => (o * dim * c) / (dim + c * Math.abs(o)); // soft resistance when pulled up past the top
+    const onStart = (e) => {
+      sy = e.touches[0].clientY; dy = 0; hist = [{ y: sy, t: performance.now() }];
+      fromHead = !!(e.target.closest && e.target.closest(".sheet-grip,.sheet-head"));
+      active = fromHead || sheet.scrollTop <= 0;
+      // grab a sheet that is mid-flight: freeze it where it is on screen
+      const live = getComputedStyle(sheet).transform;
+      if (live && live !== "none") { const my = new DOMMatrix(live).m42; if (my > 1) { sheet.style.transition = "none"; sheet.style.transform = `translateY(${my}px)`; } }
+    };
+    const onMove = (e) => {
+      if (!active) return;
+      const y = e.touches[0].clientY, d = y - sy;
+      hist.push({ y, t: performance.now() }); if (hist.length > 6) hist.shift();
+      if (d > 0 && (fromHead || sheet.scrollTop <= 0)) {
+        e.preventDefault(); dy = d; sheet.style.transition = "none"; sheet.style.transform = `translateY(${d}px)`;
+        const bd = backdropEl(); if (bd) { bd.style.transition = "none"; bd.style.opacity = String(Math.max(0, 1 - d / Math.max(sheet.offsetHeight, 1))); }
+      } else if (d < 0 && fromHead) {
+        e.preventDefault(); dy = d; sheet.style.transition = "none"; sheet.style.transform = `translateY(${rubber(d, 300)}px)`;
+      } else if (d < 0 && dy === 0) active = false;
+    };
+    const onEnd = () => {
+      if (!dy) return;
+      const reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      const now = performance.now();
+      const a = hist.find((h) => now - h.t < 120) || hist[hist.length - 1], b = hist[hist.length - 1];
+      const v = a && b && b.t > a.t ? ((b.y - a.y) / (b.t - a.t)) * 1000 : 0; // px/s, + is downward
+      const projected = dy + (v / 1000) * 0.998 / (1 - 0.998); // where a flick would coast to
+      const bd = backdropEl();
+      if (dy > 0 && projected > 110) {
+        const remain = Math.max(sheet.offsetHeight - dy, 1);
+        const dur = reduce ? 0.12 : Math.min(0.32, Math.max(0.16, remain / Math.max(v, 600)));
+        sheet.style.transition = `transform ${dur}s cubic-bezier(.2,.8,.3,1)`; sheet.style.transform = "translateY(105%)";
+        if (bd) { bd.style.transition = `opacity ${dur}s ease`; bd.style.opacity = "0"; }
+        setTimeout(() => { const x = backdropEl(); if (x) x.click(); }, dur * 1000 - 20);
+      } else {
+        // flick-less release: settle back with a hint of overshoot only if the finger carried momentum
+        sheet.style.transition = reduce ? "transform .12s ease" : (Math.abs(v) > 300 ? "transform .38s cubic-bezier(.34,1.35,.64,1)" : "transform .3s cubic-bezier(.2,.8,.3,1)");
+        sheet.style.transform = "";
+        if (bd) { bd.style.transition = "opacity .25s ease"; bd.style.opacity = ""; }
+      }
+      dy = 0;
+    };
+    sheet.addEventListener("touchstart", onStart, { passive: true });
+    sheet.addEventListener("touchmove", onMove, { passive: false });
+    sheet.addEventListener("touchend", onEnd);
+    sheet.addEventListener("touchcancel", onEnd);
+    return () => {
+      document.documentElement.classList.remove("sheet-open");
+      sheet.removeEventListener("touchstart", onStart); sheet.removeEventListener("touchmove", onMove);
+      sheet.removeEventListener("touchend", onEnd); sheet.removeEventListener("touchcancel", onEnd);
+    };
+  }, [sheetOpen]);
+  const [exUndo, setExUndo] = useState(null);
+  const exUndoTimer = useRef(null);
+  const deleteExercise = (name) => {
+    const count = (entriesByExercise[name] || []).length;
+    if (!confirm(`Delete "${name}" and all ${count} logged set${count === 1 ? "" : "s"}? This can't be undone.`)) return;
+    const nextExercises = {};
+    Object.keys(exercises).forEach((w) => { nextExercises[w] = exercises[w].filter((n) => n.toLowerCase() !== name.toLowerCase()); });
+    persist({ workouts, exercises: nextExercises, entries: entries.filter((e) => e.exercise !== name) });
+    setChartFocusExercise(null);
+    if (recExercise === name) setRecExercise(null);
+    setXpage(null);
+    setExUndo({ name, count, prevExercises: exercises, prevEntries: entries });
+    if (exUndoTimer.current) clearTimeout(exUndoTimer.current);
+    exUndoTimer.current = setTimeout(() => setExUndo(null), 10000);
+  };
+  const undoDeleteExercise = () => {
+    if (!exUndo) return;
+    persist({ workouts, exercises: exUndo.prevExercises, entries: exUndo.prevEntries });
+    setExUndo(null);
+  };
+
+  // ---- Overall-section data -------------------------------------------------------------------------
+  const [portfolioRange, setPortfolioRange] = useState("3m");
+  const [maKeyRaw, setMaKey] = useState("30");
+  const [compareOpen, setCompareOpen] = useState(false);
+  const maKey = compareOpen ? maKeyRaw : "off";
   const [scrubPoint, setScrubPoint] = useState(null);
 
-  const radarData = useMemo(() => {
-    return workouts.map((w) => {
-      const exList = exercises[w.id] || [];
-      const perExercise = exList.map((ex) => {
-        const hist = (entriesByExerciseStrength[ex] || []).slice().sort((a, b) => (a.date < b.date ? -1 : 1));
-        const byDate = {};
-        hist.forEach((e) => { const cur = byDate[e.date]; if (!cur || e.weight > cur.weight) byDate[e.date] = e; });
-        const dates = Object.keys(byDate).sort();
-        if (dates.length < 2) return null;
-        const first = estE1RM(byDate[dates[0]].weight, byDate[dates[0]].reps);
-        const last = estE1RM(byDate[dates[dates.length - 1]].weight, byDate[dates[dates.length - 1]].reps);
-        return first ? ((last - first) / first) * 100 : 0;
-      }).filter((v) => v !== null);
-      const avg = perExercise.length ? Math.round(perExercise.reduce((a, b) => a + b, 0) / perExercise.length) : 0;
-      return { label: w.name, value: avg, hasData: perExercise.length > 0 };
-    });
-  }, [workouts, exercises, entriesByExerciseStrength]);
+  // Same numbers the Strength page shows for "All time", so the chart and its breakdown always agree.
+  const radarData = useMemo(
+    () => growthByCategory({ workouts, exercises, entries: strengthEntries, start: "0000-01-01", end: "9999-12-31" }).map((c) => ({ id: c.id, label: c.label, value: c.value, hasData: c.hasData })),
+    [workouts, exercises, strengthEntries]
+  );
 
+  // Calendar weeks, Monday to Sunday, warm-ups excluded. The current week is "so far".
   const weeklyVolume = useMemo(() => {
     const numWeeks = 10;
+    const thisWeek = weekStartISO(todayISO());
     const weeks = [];
     for (let i = numWeeks - 1; i >= 0; i--) {
-      const end = shiftDate(todayISO(), -i * 7);
-      const start = shiftDate(end, -6);
-      const vol = entries.filter((e) => e.date >= start && e.date <= end).reduce((sum, e) => sum + e.weight * e.sets * e.reps, 0);
-      weeks.push({ label: `W${numWeeks - i}`, volume: vol, start, end, isCurrent: i === 0 });
+      const start = shiftDate(thisWeek, -i * 7);
+      const end = shiftDate(start, 6);
+      const vol = strengthEntries.filter((e) => e.date >= start && e.date <= end).reduce((sum, e) => sum + e.weight * (e.sets || 1) * e.reps, 0);
+      const [, m, d] = start.split("-");
+      weeks.push({ label: `${+m}/${+d}`, volume: vol, start, end, isCurrent: i === 0 });
     }
     return weeks;
-  }, [entries]);
+  }, [strengthEntries]);
 
   const heatmapWeeks = useMemo(() => {
     const numWeeks = 10;
+    const today = todayISO();
+    const thisWeek = weekStartISO(today);
     const countByDate = {};
-    entries.forEach((e) => { countByDate[e.date] = (countByDate[e.date] || 0) + 1; });
+    strengthEntries.forEach((e) => { countByDate[e.date] = (countByDate[e.date] || 0) + 1; });
     const weeks = [];
     for (let w = numWeeks - 1; w >= 0; w--) {
       const week = [];
-      for (let d = 6; d >= 0; d--) {
-        const date = shiftDate(todayISO(), -(w * 7 + d));
-        week.push({ date, count: Math.min(countByDate[date] || 0, 3) });
+      for (let d = 0; d < 7; d++) {
+        const date = shiftDate(thisWeek, -w * 7 + d);
+        week.push({ date, count: Math.min(countByDate[date] || 0, 3), future: date > today });
       }
       weeks.push(week);
     }
     return weeks;
-  }, [entries]);
+  }, [strengthEntries]);
+
+  const consistency = useMemo(() => {
+    const today = todayISO(), thisWeek = weekStartISO(today);
+    const weeksSet = new Set(), month = today.slice(0, 7), days = new Set();
+    strengthEntries.forEach((e) => { weeksSet.add(weekStartISO(e.date)); if (e.date.startsWith(month)) days.add(e.date); });
+    let w = thisWeek, streak = 0;
+    if (!weeksSet.has(w)) w = shiftDate(w, -7); // this week may simply not have started yet
+    while (weeksSet.has(w)) { streak++; w = shiftDate(w, -7); }
+    return { streak, month: days.size };
+  }, [strengthEntries]);
 
   const allTimeRange = useMemo(() => {
     if (!entries.length) return null;
@@ -972,63 +2557,95 @@ export default function Home() {
   }, [entries]);
 
   const [radarInfoOpen, setRadarInfoOpen] = useState(false);
-  const [insightIndex, setInsightIndex] = useState(0);
-  useEffect(() => {
-    const interval = setInterval(() => setInsightIndex((i) => i + 1), 45000);
-    return () => clearInterval(interval);
-  }, []);
+  const [overview, setOverview] = useState(null); // Training overview drill-down page: { kind, range, cat?, date? }
   const [volumeTapInfo, setVolumeTapInfo] = useState(null);
   const [heatmapInfoOpen, setHeatmapInfoOpen] = useState(false);
 
-  const [carouselPage, setCarouselPage] = useState(0);
-  const carouselRef = useRef(null);
-  const carouselLastInteraction = useRef(Date.now());
-  const onCarouselScroll = () => {
-    const el = carouselRef.current;
-    if (!el) return;
-    const page = Math.round(el.scrollLeft / el.clientWidth);
-    setCarouselPage(page);
-  };
-  const resetCarouselAutoplay = () => { carouselLastInteraction.current = Date.now(); };
+  const [digestOpen, setDigestOpen] = useState(false);
+  // Vibration only exists on Android-style browsers; hide its switch anywhere it can't work (iOS, desktop).
+  const [canVibrate, setCanVibrate] = useState(false);
   useEffect(() => {
-    const CAROUSEL_PAGE_COUNT = 4;
-    const AUTOPLAY_MS = 20000;
-    const interval = setInterval(() => {
-      const el = carouselRef.current;
-      if (!el) return;
-      if (Date.now() - carouselLastInteraction.current >= AUTOPLAY_MS) {
-        const nextPage = (Math.round(el.scrollLeft / el.clientWidth) + 1) % CAROUSEL_PAGE_COUNT;
-        el.scrollTo({ left: nextPage * el.clientWidth, behavior: "smooth" });
-        carouselLastInteraction.current = Date.now();
-      }
-    }, 1000);
-    return () => clearInterval(interval);
+    try {
+      const ios = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+      setCanVibrate(typeof navigator.vibrate === "function" && !ios);
+    } catch (e) { /* ignore */ }
   }, []);
-
-  // A manual swipe that starts on the chart itself is driven entirely in JS (see PortfolioChart) —
-  // these two let it reach into the carousel's own scroll position during that gesture.
-  const chartSwipeStartLeft = useRef(0);
-  const onChartSwipeStart = () => { chartSwipeStartLeft.current = carouselRef.current ? carouselRef.current.scrollLeft : 0; return chartSwipeStartLeft.current; };
-  const onChartSwipeMove = (nextLeft) => { if (carouselRef.current) carouselRef.current.scrollLeft = nextLeft; resetCarouselAutoplay(); };
-  const onChartSwipeEnd = () => {
-    const el = carouselRef.current;
-    if (!el) return;
-    const nextPage = Math.round(el.scrollLeft / el.clientWidth);
-    el.scrollTo({ left: nextPage * el.clientWidth, behavior: "smooth" });
-    resetCarouselAutoplay();
+  const [progCleared, setProgCleared] = useState(false);
+  // ---- Tutorial (runs on sample data that is never saved) ----
+  const [tutIdx, setTutIdx] = useState(null);
+  const tutSnap = useRef(null);
+  const closeAllViews = () => { setOverview(null); setCompareOpen(false); setCarouselOpen(false); setXpage(null); setFeedOpen(false); setSettingsOpen(false); setAddingExercise(false); };
+  const startTutorial = () => {
+    if (demoRef.current) return;
+    tutSnap.current = { workouts, exercises, entries, restDays, tickers, exMeta, progressionMode, chartFocusExercise, selectedDate };
+    demoRef.current = true;
+    const d = buildDemoData();
+    setWorkouts(d.workouts); setExercises(d.exercises); setEntries(d.entries); setRestDays([]); setTickers({});
+    setChartFocusExercise("Bench Press"); setProgCleared(false);
+    closeAllViews(); window.scrollTo(0, 0);
+    setTutIdx(0);
   };
-
-  // Everything now lives on one continuously scrolling page — the bottom nav and the header
-  // shortcut just scroll to the relevant section instead of switching which one is rendered.
+  const endTutorial = () => {
+    const sn = tutSnap.current;
+    closeAllViews();
+    setAddingExercise(false);
+    if (sn) { setWorkouts(sn.workouts); setExercises(sn.exercises); setEntries(sn.entries); setRestDays(sn.restDays); setTickers(sn.tickers); setExMeta(sn.exMeta || {}); setProgressionMode(sn.progressionMode); setChartFocusExercise(sn.chartFocusExercise); setProgCleared(!sn.chartFocusExercise); setSelectedDate(sn.selectedDate); }
+    demoRef.current = false; tutSnap.current = null;
+    setTutIdx(null);
+    try { localStorage.setItem("hooksTutorialDone", "1"); } catch (e) { /* ignore */ }
+    window.scrollTo(0, 0);
+  };
   useEffect(() => {
-    if (!loaded || chartFocusExercise || !entries.length) return;
+    if (!loaded || (entries.length && !DEMO) || demoRef.current) return;
+    try { if (!localStorage.getItem("hooksTutorialDone")) setTimeout(startTutorial, 400); } catch (e) { /* ignore */ }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loaded, entries.length]);
+  const qs = (sel) => () => document.querySelector(sel);
+  const cardWith = (txt) => () => Array.from(document.querySelectorAll("[data-tut=charts] .card")).find((c) => c.textContent.includes(txt)) || null;
+  const tutSteps = [
+    { text: "Capital Gains\nTrack every lift and never stall.", before: () => { closeAllViews(); setAddingExercise(false); window.scrollTo(0, 0); }, next: "Start" },
+    { text: "Tap Exercises, or pull down, to see each exercise with your estimated max.", before: () => { closeAllViews(); setAddingExercise(false); window.scrollTo(0, 0); setTimeout(() => setCarouselOpen(true), 30); }, target: qs(".carousel") },
+    { text: "Tap a ticker to open it.", before: () => { setXpage(null); setCarouselOpen(true); window.scrollTo(0, 0); }, target: qs(".carousel-card:not(.all)"), wait: () => !!xpage },
+    { text: "Your one-rep max, estimated five-rep max, average weight, total volume and sessions logged.", before: () => { setCarouselOpen(false); setXpage((x) => x || { exercise: "Bench Press", date: todayISO(), ytd: true }); }, target: qs(".stats-block") },
+    { text: "Switch the time range to see your strength over 1, 3 or 6 months and more.", before: () => { closeAllViews(); setAddingExercise(false); window.scrollTo(0, 0); }, target: qs(".overall-screen .range-tabs") },
+    { text: "Tap Compare to your average to see your averages.", before: () => { closeAllViews(); setAddingExercise(false); setCompareOpen(false); }, target: qs(".overall-screen .compare-chip") },
+    { text: "This is your average strength over that period. Tap 30, 90 or 365 days to see if you are beating your own average.", before: () => { closeAllViews(); setAddingExercise(false); setCompareOpen(true); }, target: qs(".overall-screen .pills-sub") },
+    { text: "Log every set to make sure you keep progressively overloading. There is no point lifting if you are not improving.", before: () => { closeAllViews(); setAddingExercise(false); }, target: qs(".log-set-row") },
+    { text: "Lifter's Digest: your latest workout, what is improving, and what needs work.", before: () => { closeAllViews(); setAddingExercise(false); }, target: qs(".digest-card2") },
+    { text: "Exercises belong to workout days. The day you have not hit in a while shows as due here, with the number of days since you last trained it.", before: () => { closeAllViews(); setAddingExercise(false); window.scrollTo(0, 0); }, target: qs(".log-set-row") },
+    { text: "Search an exercise, enter weight, reps and sets. Log one set at a time or all at once.", before: () => { closeAllViews(); setAddingExercise(false); }, target: qs(".card-tabbed") },
+    { text: "Scan a machine with the camera to add an exercise under a specific brand. The app remembers the exercise name and the machine brand, because machines can work the same muscle group but feel different from one manufacturer to another.", before: () => { closeAllViews(); setAddingExercise(true); }, target: qs(".add-card .scan-btn") },
+    { text: "Add a new exercise. Type its name, set a ticker, and add the machine brand. Then choose the workout days it belongs to.", before: () => { closeAllViews(); setAddingExercise(true); }, target: qs(".add-card"), maxH: 395 },
+    { text: "Some exercises use both sides at once, like bench press or squat. Select Both sides for those. Others work one side at a time, like Bulgarian split squats or concentration curls. Select One side at a time for those.", before: () => { closeAllViews(); setAddingExercise(true); }, target: qs(".add-card .side-row") },
+    { text: "Photograph your handwritten notes and the app imports those sets, so your history comes with you.", before: () => { closeAllViews(); setAddingExercise(false); }, target: qs(".cam-btn") },
+    { text: "Pick an exercise to see if you are improving. Top weight is your heaviest set. Estimated 1RM is what you could lift once, calculated from your weight and reps.", before: () => { closeAllViews(); setAddingExercise(false); }, target: () => { const sv = Array.from(document.querySelectorAll("[data-tut=charts] svg")).find((x) => x.getBoundingClientRect().height > 120); return sv ? sv.parentElement : null; } },
+    { text: "Every logged set is listed below the graph. Tap one to delete.", before: () => { closeAllViews(); setAddingExercise(false); }, target: () => document.querySelector("[data-tut=charts] .hist-list") },
+    { text: "Strength growth shows which muscle groups are progressing most.", before: () => { closeAllViews(); setAddingExercise(false); }, target: cardWith("Strength growth") },
+    { text: "Weekly volume is weight × reps × sets for the last 10 weeks.", before: () => { closeAllViews(); setAddingExercise(false); }, target: cardWith("Weekly training volume") },
+    { text: "Consistency shows which days you show up. A lit square is a day you trained.", before: () => { closeAllViews(); setAddingExercise(false); }, target: cardWith("Training consistency") },
+    { text: "Social is the feed, opened with this button. It shows how friends and friends of friends are doing. Follow your friends to track their progress.", before: () => { closeAllViews(); setAddingExercise(false); setFeedOpen(true); }, target: qs(".feed-fab"), round: true },
+    { text: "That is it. To replay this tutorial, tap the gear, then select Replay tutorial at the top of the Settings page.", before: () => { closeAllViews(); setAddingExercise(false); window.scrollTo(0, 0); }, target: qs(".gear-btn"), next: "Done" },
+  ];
+  useEffect(() => {
+    if (!loaded || chartFocusExercise || progCleared || !entries.length) return;
     const latest = entries.reduce((a, b) => (b.date > a.date ? b : a), entries[0]);
     if (latest) setChartFocusExercise(latest.exercise);
-  }, [loaded, entries, chartFocusExercise]);
+  }, [loaded, entries, chartFocusExercise, progCleared]);
 
+  // Everything lives on one continuously scrolling page; the bottom nav just scrolls to a section.
   const sectionRefs = useRef({});
-  const scrollToSection = (key) => { sectionRefs.current[key]?.scrollIntoView({ behavior: "smooth", block: "start" }); };
+  const scrollToSection = (key) => { sectionRefs.current[key]?.scrollIntoView({ behavior: (typeof window !== "undefined" && window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) ? "auto" : "smooth", block: "start" }); };
   const [activeSection, setActiveSection] = useState("portfolio");
+  const [dockVisible, setDockVisible] = useState(false);
+  const [feedOpen, setFeedOpen] = useState(false);
+  // While the feed is open, freeze the page behind it so touches scroll the feed (iPhone was scrolling the page underneath).
+  useEffect(() => {
+    if (!feedOpen) return undefined;
+    document.documentElement.classList.add("feed-open");
+    return () => document.documentElement.classList.remove("feed-open");
+  }, [feedOpen]);
+  const dpRef = useRef(0);
+  const saveBtnRef = useRef(null);
   useEffect(() => {
     const onScroll = () => {
       const keys = Object.keys(sectionRefs.current);
@@ -1040,61 +2657,159 @@ export default function Home() {
         if (dist < closestDist) { closestDist = dist; closest = k; }
       });
       if (closest) setActiveSection(closest);
+      // The docked Log button shows while the Workout section is on screen.
+      const home = sectionRefs.current.home;
+      if (home) {
+        const r = home.getBoundingClientRect();
+        // The Log button fades and slides in as the Workout area comes up, and back out as it leaves.
+        const enter = Math.min(1, Math.max(0, (window.innerHeight - 120 - r.top) / 260));
+        const leave = Math.min(1, Math.max(0, (r.bottom - 180) / 200));
+        const p = Math.min(enter, leave);
+        dpRef.current = p;
+        if (saveBtnRef.current) { saveBtnRef.current.style.setProperty("--dp", String(p)); saveBtnRef.current.style.pointerEvents = p > 0.5 ? "auto" : "none"; }
+        setDockVisible(p > 0.01);
+      }
     };
     window.addEventListener("scroll", onScroll, { passive: true });
+    window.addEventListener("resize", onScroll);
     onScroll();
-    return () => window.removeEventListener("scroll", onScroll);
-  }, []);
+    return () => { window.removeEventListener("scroll", onScroll); window.removeEventListener("resize", onScroll); };
+  }, [loaded]);
 
-  // Whichever workout has gone longest without a session (rest days you've marked don't count
-  // against it) — shown as a one-tap suggestion right where you'd otherwise open the dropdown.
-  const dueWorkout = useMemo(() => {
+  // The docked Log button and rest timer sit just above the bottom nav, whatever height it is.
+  const navRef = useRef(null);
+  const dockRef = useRef(null);
+  const [navH, setNavH] = useState(66);
+  useEffect(() => {
+    const measure = () => { if (navRef.current) setNavH(Math.round(navRef.current.getBoundingClientRect().height)); };
+    measure();
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, [loaded, passcode]);
+
+  // A day only counts as trained on a date when at least 3 different exercises from it were logged
+  // that day (so calves tacked onto every session don't reset the Legs clock). An exercise counts
+  // toward every day it's listed under. If a day has never had a 3-exercise session, its last date
+  // with anything logged is used so it doesn't go blank.
+  const DAY_MIN_EXERCISES = 3;
+  const dayStats = useMemo(() => {
     const todayIso = todayISO();
-    const restSet = new Set(restDays);
-    const daysSinceTrained = (workoutId) => {
-      const wEntries = entries.filter((e) => e.workoutId === workoutId);
-      if (!wEntries.length) return Infinity;
-      const lastDate = wEntries.reduce((max, e) => (e.date > max ? e.date : max), wEntries[0].date);
-      const rawDays = Math.round((new Date(todayIso) - new Date(lastDate)) / 86400000);
-      let restDaysInRange = 0;
-      for (let i = 1; i <= rawDays; i++) if (restSet.has(shiftDate(todayIso, -i))) restDaysInRange++;
-      return rawDays - restDaysInRange;
-    };
-    const candidates = workouts
-      .filter((w) => w.id !== activeWorkoutId)
-      .map((w) => ({ workout: w, days: daysSinceTrained(w.id) }))
-      .filter((c) => c.days >= 3);
-    if (!candidates.length) return null;
-    candidates.sort((a, b) => b.days - a.days);
-    return candidates[0];
-  }, [workouts, entries, restDays, activeWorkoutId]);
+    const wkStart = weekStartISO(todayIso);
+    return workouts.map((w) => {
+      const names = new Set((exercises[w.id] || []).map((n) => n.toLowerCase()));
+      const belongs = (e) => e.workoutId === w.id || names.has(e.exercise.toLowerCase());
+      const byDate = {};
+      let weekSets = 0, lastAny = null;
+      strengthEntries.forEach((e) => {
+        if (!belongs(e)) return;
+        (byDate[e.date] = byDate[e.date] || new Set()).add(e.exercise);
+        if (!lastAny || e.date > lastAny) lastAny = e.date;
+        if (e.date >= wkStart) weekSets += Math.max(1, e.sets || 1);
+      });
+      let lastFull = null;
+      Object.keys(byDate).forEach((d) => { if (byDate[d].size >= DAY_MIN_EXERCISES && (!lastFull || d > lastFull)) lastFull = d; });
+      const last = lastFull || lastAny;
+      return { workout: w, days: last ? daysBetween(last, todayIso) : Infinity, weekSets };
+    });
+  }, [workouts, exercises, strengthEntries]);
+
+  const dueWorkout = useMemo(() => {
+    const c = dayStats.filter((d) => d.days >= 3);
+    if (!c.length) return null;
+    return c.slice().sort((a, b) => b.days - a.days)[0];
+  }, [dayStats]);
+
+  // What you usually log first on a given day, and which lift tends to follow which, both read from
+  // the order sets were logged in (entries are stored newest first).
+  const sessionOrders = useMemo(() => {
+    const byDate = {};
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const e = entries[i];
+      if (e.isWarmup) continue;
+      const seq = (byDate[e.date] = byDate[e.date] || []);
+      if (seq[seq.length - 1] !== e.exercise) seq.push(e.exercise);
+    }
+    return Object.values(byDate);
+  }, [entries]);
+  // Next-exercise suggestions only learn from the last 14 days, so a changed routine takes over quickly.
+  const NEXT_WINDOW_DAYS = 14;
+  const recentOrders = useMemo(() => {
+    const cutoff = shiftDate(todayISO(), -(NEXT_WINDOW_DAYS - 1));
+    const byDate = {};
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const e = entries[i];
+      if (e.isWarmup || e.date < cutoff) continue;
+      const seq = (byDate[e.date] = byDate[e.date] || []);
+      if (seq[seq.length - 1] !== e.exercise) seq.push(e.exercise);
+    }
+    return Object.values(byDate);
+  }, [entries]);
+  const nextMap = useMemo(() => {
+    const m = {};
+    recentOrders.forEach((seq) => { for (let i = 0; i < seq.length - 1; i++) { const a = seq[i], b = seq[i + 1]; if (a === b) continue; ((m[a] = m[a] || {})[b] = (m[a][b] || 0) + 1); } });
+    return m;
+  }, [recentOrders]);
+  const nextTarget = useMemo(() => {
+    if (!recExercise || !nextMap[recExercise]) return null;
+    const doneToday = new Set(todaysEntries.map((e) => e.exercise));
+    // Only suggest lifts that share a workout day with this one (Bench can lead to Incline, not Squat).
+    const lc = (n) => n.toLowerCase();
+    const sameDay = new Set();
+    workouts.forEach((w) => {
+      const names = (exercises[w.id] || []).map(lc);
+      if (names.includes(lc(recExercise))) names.forEach((n) => sameDay.add(n));
+    });
+    const opts = Object.entries(nextMap[recExercise]).filter(([n, c]) => c >= 1 && !doneToday.has(n) && sameDay.has(lc(n))).sort((a, b) => b[1] - a[1]);
+    return opts.length ? opts[0][0] : null;
+  }, [recExercise, nextMap, todaysEntries, workouts, exercises]);
+  const startDay = (workoutId) => {
+    const names = new Set((exercises[workoutId] || []).map((n) => n.toLowerCase()));
+    const counts = {};
+    sessionOrders.forEach((seq) => { const first = seq.find((n) => names.has(n.toLowerCase())); if (first) counts[first] = (counts[first] || 0) + 1; });
+    const top = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
+    const pick = top ? top[0] : (exercises[workoutId] || [])[0];
+    setActiveWorkoutId(workoutId);
+    if (pick) selectExercise(pick);
+  };
+
+  // ---- Lifter's Digest: stats computed here, worded by Claude when AI is on, plain text otherwise ----
+  const digestStats = useMemo(() => (loaded && strengthEntries.length ? computeDigestStats({ strengthEntries, dayStats, todayIso: todayISO(), workouts, exercises, due: dueWorkout ? { day: dueWorkout.workout.name, days: dueWorkout.days } : null, goal: (GOALS.find((g) => g.key === settings.goal) || GOALS[0]).label, unit }) : null), [loaded, strengthEntries, dayStats, workouts, exercises, dueWorkout, settings.goal, unit]);
+  const digestSig = useMemo(() => (digestStats ? hashStr(JSON.stringify(digestStats)) : ""), [digestStats]);
+  const [aiDigest, setAiDigest] = useState(null);
+  useEffect(() => {
+    setAiDigest(null);
+    if (DEMO || !digestStats || !passcode || !settings.ai || demoRef.current) return undefined;
+    let cancelled = false;
+    const key = `hooksDigest2:${todayISO()}:${digestSig}`;
+    try { const c = localStorage.getItem(key); if (c) { setAiDigest(JSON.parse(c)); return undefined; } } catch (e) { /* ignore */ }
+    fetch("/api/digest", { method: "POST", headers: { "Content-Type": "application/json", "x-app-passcode": passcode }, body: JSON.stringify({ stats: digestStats }) })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (cancelled || !d || !d.sections || typeof d.sections.last !== "string") return; setAiDigest(d.sections); try { localStorage.setItem(key, JSON.stringify(d.sections)); } catch (e) { /* ignore */ } })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [digestSig, passcode, settings.ai]);
+  const basicDigest = useMemo(() => digestBasic(digestStats), [digestStats]);
+  const digest = { ...basicDigest, ...(aiDigest || {}) };
 
   const insights = useMemo(() => {
     const list = [];
     const todayIso = todayISO();
-    const restSet = new Set(restDays);
 
     workouts.forEach((w) => {
-      const wEntries = entries.filter((e) => e.workoutId === w.id);
+      const wEntries = strengthEntries.filter((e) => e.workoutId === w.id);
       if (!wEntries.length) return;
       const lastDate = wEntries.reduce((max, e) => (e.date > max ? e.date : max), wEntries[0].date);
-      const rawDays = Math.round((new Date(todayIso) - new Date(lastDate)) / 86400000);
-      // Rest days you've explicitly marked don't count against you here.
-      let restDaysInRange = 0;
-      for (let i = 1; i <= rawDays; i++) {
-        if (restSet.has(shiftDate(todayIso, -i))) restDaysInRange++;
-      }
-      const daysSince = rawDays - restDaysInRange;
-      if (daysSince >= 7) list.push({ type: "stale", text: `Haven't trained ${w.name} in ${daysSince} days${restDaysInRange ? ` (${restDaysInRange} of those were rest days)` : ""}.` });
+      const daysSince = daysBetween(lastDate, todayIso);
+      if (daysSince >= 7) list.push({ type: "stale", text: `Haven't trained ${w.name} in ${daysSince} days.` });
     });
 
     const allSeries = allExerciseNames.map((ex) => {
       const hist = entriesByExerciseStrength[ex] || [];
       const byDate = {};
-      hist.forEach((e) => { const cur = byDate[e.date]; if (!cur || e.weight > cur.weight) byDate[e.date] = e; });
+      hist.forEach((e) => { byDate[e.date] = pickBest(byDate[e.date], e); });
       const dates = Object.keys(byDate).sort();
-      const points = dates.map((d) => estE1RM(byDate[d].weight, byDate[d].reps));
-      const best = hist.length ? Math.max(...hist.map((e) => estE1RM(e.weight, e.reps))) : 0;
+      const points = dates.map((d) => e1(byDate[d]));
+      const best = hist.length ? Math.max(...hist.map((e) => e1(e))) : 0;
       return { exercise: ex, points, best };
     }).filter((s) => s.points.length >= 3);
 
@@ -1102,12 +2817,12 @@ export default function Home() {
       const withChange = allSeries.map((s) => ({ ...s, pct: Math.round(((s.points[s.points.length - 1] - s.points[0]) / s.points[0]) * 100) }));
       const bestMover = withChange.reduce((a, b) => (b.pct > a.pct ? b : a));
       const worstMover = withChange.reduce((a, b) => (b.pct < a.pct ? b : a));
-      if (bestMover.pct > 0) list.push({ type: "up", text: `${bestMover.exercise} is up ${bestMover.pct}% — your best mover right now.` });
+      if (bestMover.pct > 0) list.push({ type: "up", text: `${bestMover.exercise} is up ${bestMover.pct}%, your best mover right now.` });
       if (withChange.length > 1 && worstMover.exercise !== bestMover.exercise) {
-        list.push({ type: worstMover.pct < 0 ? "down" : "flat", text: worstMover.pct < 0 ? `${worstMover.exercise} is down ${Math.abs(worstMover.pct)}% — might be worth extra attention.` : `${worstMover.exercise} is up only ${worstMover.pct}% — your slowest mover.` });
+        list.push({ type: worstMover.pct < 0 ? "down" : "flat", text: worstMover.pct < 0 ? `${worstMover.exercise} is down ${Math.abs(worstMover.pct)}%, which might be worth extra attention.` : `${worstMover.exercise} is up only ${worstMover.pct}%, your slowest mover.` });
       }
       const strongest = allSeries.reduce((a, b) => (b.best > a.best ? b : a));
-      list.push({ type: "strongest", text: `${strongest.exercise} is your strongest lift — est. ${strongest.best} lb 1RM.` });
+      list.push({ type: "strongest", text: `${strongest.exercise} is your strongest lift, est. ${W(strongest.best)} ${unit} 1RM.` });
 
       // Near a personal record: current e1RM is close to (but hasn't yet matched) the all-time best.
       const nearPR = allSeries
@@ -1116,12 +2831,12 @@ export default function Home() {
         .sort((a, b) => (a.best - a.latest) / a.best - (b.best - b.latest) / b.best)[0];
       if (nearPR) {
         const pctOff = Math.round(((nearPR.best - nearPR.latest) / nearPR.best) * 100);
-        list.push({ type: "pr", text: `${nearPR.exercise} is within ${pctOff}% of its all-time best — close to a new personal record.` });
+        list.push({ type: "pr", text: `${nearPR.exercise} is within ${pctOff}% of its all-time best, close to a new personal record.` });
       }
     }
 
     return list;
-  }, [entries, workouts, allExerciseNames, entriesByExerciseStrength, restDays]);
+  }, [strengthEntries, workouts, allExerciseNames, entriesByExerciseStrength]);
 
   // Strength Index: a chain-linked, equal-weighted index of every lift's estimated 1RM, starting
   // at 100. Each day's move is the average of that day's actual changes across all lifts you've
@@ -1130,13 +2845,13 @@ export default function Home() {
   // would turn that noise into fake growth. Log-changes cancel exactly, so the index equals the
   // true geometric average of every lift's growth. Because it chains daily
   // changes instead of averaging levels, adding a brand-new lift never causes a jump, and a
-  // lift you skip simply holds its last value until it prints again.
+  // lift you skip simply holds its last value until it prints again. The chart only ever shows
+  // the % change over the selected range, so the starting 100 is never on screen.
   const portfolioSeries = useMemo(() => {
     const perExercise = {};
     strengthEntries.forEach((e) => {
       perExercise[e.exercise] = perExercise[e.exercise] || {};
-      const cur = perExercise[e.exercise][e.date];
-      if (!cur || e.weight > cur.weight) perExercise[e.exercise][e.date] = e;
+      perExercise[e.exercise][e.date] = pickBest(perExercise[e.exercise][e.date], e);
     });
     const exNames = Object.keys(perExercise).filter((ex) => Object.keys(perExercise[ex]).length >= 2);
     if (exNames.length === 0) return { rows: [] };
@@ -1145,7 +2860,7 @@ export default function Home() {
     exNames.forEach((ex) => {
       const dates = Object.keys(perExercise[ex]).sort();
       price[ex] = {};
-      dates.forEach((d) => { price[ex][d] = estE1RM(perExercise[ex][d].weight, perExercise[ex][d].reps); });
+      dates.forEach((d) => { price[ex][d] = e1(perExercise[ex][d]); });
       firstDate[ex] = dates[0];
     });
 
@@ -1153,7 +2868,7 @@ export default function Home() {
     exNames.forEach((ex) => Object.keys(perExercise[ex]).forEach((d) => sparseDatesSet.add(d)));
     const sparseDates = Array.from(sparseDatesSet).sort();
 
-    // One row per calendar day so rest days show as a flat continuation.
+    // One row per calendar day so days off show as a flat continuation.
     const allDates = [];
     for (let d = sparseDates[0]; d <= todayISO(); d = shiftDate(d, 1)) allDates.push(d);
 
@@ -1170,17 +2885,14 @@ export default function Home() {
         }
       });
       if (di > 0 && active > 0) index = index * Math.exp(retSum / active);
-      return { date, label: fmtDate(date), value: Math.round(index * 10) / 10 };
+      return { date, label: fmtDate(date), value: Math.round(index * 100) / 100 };
     });
 
     return { rows, exerciseCount: exNames.length };
   }, [strengthEntries]);
 
-  const portfolioCutoff = useMemo(() => shiftDate(todayISO(), -RANGE_PRESETS.find((r) => r.key === portfolioRange).days), [portfolioRange]);
-
-  // Flags an unusually large single-session swing in the Overall index, and — when it can —
-  // names a likely driver: an exercise with a thin logged history swings the blended average
-  // more than one of your regulars would, since it has less of its own trend to anchor against.
+  // Flags an unusually large single-session swing in the index and, when it can, names a likely
+  // driver: an exercise with a thin logged history swings the blended average more than a regular.
   const fluctuationInsight = useMemo(() => {
     const rows = portfolioSeries.rows;
     if (rows.length < 2) return null;
@@ -1191,474 +2903,382 @@ export default function Home() {
     const todaysExercises = strengthEntries.filter((e) => e.date === last.date).map((e) => e.exercise);
     const thin = todaysExercises.find((ex) => (entriesByExerciseStrength[ex] || []).length <= 4);
     const direction = delta > 0 ? "jumped" : "dropped";
-    let text = `Overall ${direction} ${Math.abs(delta)} pts on ${last.label} — a bigger single-day move than usual for this index.`;
+    let text = `Overall ${direction} ${Math.abs(delta)} pts on ${last.label}, a bigger single-day move than usual for this index.`;
     if (thin) text += ` ${thin} has a short logged history, so a single result from it carries more weight than one from a lift you train constantly.`;
     return { type: delta > 0 ? "up" : "down", text };
   }, [portfolioSeries, strengthEntries, entriesByExerciseStrength]);
 
-  const portfolioFiltered = useMemo(() => {
-    const rows = portfolioSeries.rows.filter((r) => r.date >= portfolioCutoff);
-    return rows.length ? rows : portfolioSeries.rows.slice(-2);
-  }, [portfolioSeries, portfolioCutoff]);
-  const portfolioChange = useMemo(() => {
-    if (portfolioFiltered.length < 2) return null;
-    const first = portfolioFiltered[0].value, last = portfolioFiltered[portfolioFiltered.length - 1].value;
-    const pct = Math.round(((last - first) / first) * 1000) / 10;
-    return { pct, up: last >= first, last };
-  }, [portfolioFiltered]);
-  // Rebase to "% change from the start of the selected range" — the only honest way to plot a
-  // single number when it's a composite across differently-scaled exercises.
-  const portfolioDisplayRows = useMemo(() => {
-    if (portfolioFiltered.length < 2) return [];
-    const first = portfolioFiltered[0].value;
-    return portfolioFiltered.map((r) => ({ date: r.date, label: r.label, index: r.value, value: Math.round(((r.value - first) / first) * 1000) / 10 }));
-  }, [portfolioFiltered]);
-
-  // Auto-scroll drives a transform on the inner track rather than native scrollLeft — animating
-  // scrollLeft via JS on a momentum-scroll container is unreliable on iOS Safari specifically
-  // (the browser's own scroll physics can silently fight or drop the writes), which is exactly
-  // why this moved fine on a laptop but sat still on a phone. A transform runs on the compositor
-  // thread the same way on every browser, iOS included.
-  const tickerOuterRef = useRef(null);
-  const tickerTrackRef = useRef(null);
-  const tickerOffsetRef = useRef(0);
-  const tickerPausedRef = useRef(false);
-  const tickerResumeTimeout = useRef(null);
-  const tickerDraggingRef = useRef(false);
-  const tickerDragStartX = useRef(0);
-  const tickerDragStartOffset = useRef(0);
-  const tickerLastInteraction = useRef(0);
-  useEffect(() => {
-    let rafId;
-    const step = () => {
-      const outer = tickerOuterRef.current, inner = tickerTrackRef.current;
-      // Safety net: never stay paused more than 4s, even if a pointerup/touchend event got dropped
-      // (happens occasionally on iOS Safari) — self-heals instead of freezing permanently.
-      if (tickerPausedRef.current && Date.now() - tickerLastInteraction.current > 4000) {
-        tickerPausedRef.current = false;
-      }
-      if (outer && inner && !tickerPausedRef.current && inner.scrollWidth > outer.clientWidth) {
-        tickerOffsetRef.current -= 0.98;
-        const half = inner.scrollWidth / 2;
-        if (Math.abs(tickerOffsetRef.current) >= half) tickerOffsetRef.current += half;
-        inner.style.transform = `translateX(${tickerOffsetRef.current}px)`;
-      }
-      rafId = requestAnimationFrame(step);
-    };
-    rafId = requestAnimationFrame(step);
-    return () => cancelAnimationFrame(rafId);
-  }, [tickerSeries.length]);
-  const pauseTicker = () => {
-    tickerPausedRef.current = true;
-    tickerLastInteraction.current = Date.now();
-    if (tickerResumeTimeout.current) clearTimeout(tickerResumeTimeout.current);
-  };
-  const scheduleTickerResume = () => {
-    tickerLastInteraction.current = Date.now();
-    tickerResumeTimeout.current = setTimeout(() => { tickerPausedRef.current = false; }, 2000);
-  };
-  const tickerPointerDown = (e) => {
-    pauseTicker();
-    if (e.pointerType === "mouse") {
-      tickerDraggingRef.current = true;
-      tickerDragStartX.current = e.clientX;
-      tickerDragStartOffset.current = tickerOffsetRef.current;
-    }
-  };
-  const tickerPointerMove = (e) => {
-    if (!tickerDraggingRef.current || e.pointerType !== "mouse" || !tickerTrackRef.current) return;
-    tickerLastInteraction.current = Date.now();
-    tickerOffsetRef.current = tickerDragStartOffset.current + (e.clientX - tickerDragStartX.current);
-    tickerTrackRef.current.style.transform = `translateX(${tickerOffsetRef.current}px)`;
-  };
-  const tickerPointerUp = () => { tickerDraggingRef.current = false; scheduleTickerResume(); };
-
-
-  const rangeCutoff = useMemo(() => shiftDate(todayISO(), -RANGE_PRESETS.find((r) => r.key === chartRange).days), [chartRange]);
-
-  const chartResult = useMemo(() => {
-    const inRange = strengthEntries.filter((e) => e.date >= rangeCutoff);
-    const metricVal = (entry) => (chartMetric === "e1rm" ? estE1RM(entry.weight, entry.reps) : entry.weight);
-
-    if (chartFocusExercise) {
-      const scoped = inRange.filter((e) => e.exercise === chartFocusExercise);
-      const byDate = {};
-      scoped.forEach((e) => { const cur = byDate[e.date]; if (!cur || e.weight > cur.weight) byDate[e.date] = e; });
-      const dates = Object.keys(byDate).sort();
-      const rows = dates.map((date) => {
-        const entry = byDate[date];
-        return { date, label: fmtDate(date), [chartFocusExercise]: metricVal(entry), [`${chartFocusExercise}__r`]: entry.reps, [`${chartFocusExercise}__s`]: entry.sets };
-      });
-      return { rows, series: [chartFocusExercise] };
-    }
-
-    if (chartScope === "ALL") {
-      // best (heaviest) entry per exercise per date per workout
-      const byWD = {};
-      inRange.forEach((e) => {
-        byWD[e.workoutId] = byWD[e.workoutId] || {};
-        byWD[e.workoutId][e.date] = byWD[e.workoutId][e.date] || {};
-        const cur = byWD[e.workoutId][e.date][e.exercise];
-        if (!cur || e.weight > cur.weight) byWD[e.workoutId][e.date][e.exercise] = e;
-      });
-      const allDates = new Set(); Object.values(byWD).forEach((bd) => Object.keys(bd).forEach((d) => allDates.add(d)));
-      const sorted = Array.from(allDates).sort();
-      const rows = sorted.map((date) => {
-        const row = { date, label: fmtDate(date) };
-        workouts.forEach((w) => {
-          const dd = byWD[w.id]?.[date];
-          if (dd) {
-            const entryList = Object.values(dd);
-            const vals = entryList.map(metricVal);
-            row[w.name] = Math.round((vals.reduce((a, b) => a + b, 0) / vals.length) * 10) / 10;
-            row[`${w.name}__detail`] = entryList.map((e) => ({ exercise: e.exercise, weight: e.weight, reps: e.reps, sets: e.sets }));
-          }
-        });
-        return row;
-      });
-      const series = workouts.filter((w) => rows.some((r) => r[w.name] !== undefined)).map((w) => w.name);
-      return { rows, series };
-    } else {
-      const scoped = inRange.filter((e) => e.workoutId === chartScope);
-      const byExDate = {};
-      scoped.forEach((e) => { byExDate[e.exercise] = byExDate[e.exercise] || {}; const cur = byExDate[e.exercise][e.date]; if (!cur || e.weight > cur.weight) byExDate[e.exercise][e.date] = e; });
-      const allDates = new Set(); Object.values(byExDate).forEach((bd) => Object.keys(bd).forEach((d) => allDates.add(d)));
-      const sorted = Array.from(allDates).sort();
-      const rows = sorted.map((date) => {
-        const row = { date, label: fmtDate(date) };
-        Object.keys(byExDate).forEach((ex) => {
-          const entry = byExDate[ex][date];
-          if (entry) { row[ex] = metricVal(entry); row[`${ex}__r`] = entry.reps; row[`${ex}__s`] = entry.sets; }
-        });
-        return row;
-      });
-      return { rows, series: Object.keys(byExDate) };
-    }
-  }, [strengthEntries, chartScope, rangeCutoff, chartMetric, workouts, chartFocusExercise]);
-
-  const [recExercise, setRecExercise] = useState(null);
-  const [recSearch, setRecSearch] = useState("");
-  const [recSuggestOpen, setRecSuggestOpen] = useState(false);
-  const recSuggestions = useMemo(() => {
-    const q = recSearch.trim().toLowerCase();
-    if (!q) return allExerciseNames.slice(0, 8);
-    const starts = allExerciseNames.filter((e) => e.toLowerCase().startsWith(q));
-    const contains = allExerciseNames.filter((e) => !e.toLowerCase().startsWith(q) && e.toLowerCase().includes(q));
-    return [...starts, ...contains].slice(0, 8);
-  }, [recSearch, allExerciseNames]);
-  const [recSets, setRecSets] = useState(3);
-  const [manualWeight, setManualWeight] = useState("");
-  const [manualReps, setManualReps] = useState("");
-
-  const recommendation = useMemo(() => {
-    if (!recExercise) return null;
-    const hist = entriesByExerciseStrength[recExercise];
-    const hasManual = manualWeight && manualReps;
-
-    if ((!hist || !hist.length) && !hasManual) return { noData: true };
-
-    const repLow = REC_LOW, repHigh = REC_HIGH;
-
-    let nextTopWeight, note, lastTop, lastSessionDate, lastSession, basedOnActualSets;
-
-    if (hist && hist.length) {
-      const { pool: workingSetHist, recencyLimited } = pickWorkingBasis(hist);
-
-      if (workingSetHist.length > 0) {
-        lastSessionDate = workingSetHist[0].date;
-        lastSession = workingSetHist.filter((e) => e.date === lastSessionDate).sort((a, b) => b.weight - a.weight);
-        lastTop = lastSession[0];
-        nextTopWeight = lastTop.weight;
-        const recencyNote = recencyLimited ? " (based on your last ~2 months)" : "";
-
-        if (progressionMode === "reps") {
-          note = `Holding weight steady on purpose — aim to beat ${lastTop.reps} reps this time${recencyNote}. Switch back to weight-focused mode whenever you want the app to bump weight automatically.`;
-        } else {
-          const plateaued = plateauFlag(workingSetHist);
-          if (lastTop.reps >= repHigh || plateaued) {
-            const bump = lastTop.weight >= 100 ? 10 : 5;
-            nextTopWeight = lastTop.weight + bump;
-            note = plateaued && lastTop.reps < repHigh
-              ? `Same top weight 3 sessions running${recencyNote} — bumping ${bump} lbs to break the plateau.`
-              : `You hit ${lastTop.reps} reps last time (top of the 8–12 range)${recencyNote} — adding ${bump} lbs.`;
-          } else if (lastTop.reps < repLow) {
-            note = `Last working top set was ${lastTop.reps} reps, under the 8 rep floor${recencyNote} — same weight, focus on hitting 8+.`;
-          } else {
-            note = `Last working top set: ${lastTop.weight} lbs × ${lastTop.reps}${recencyNote}. Same weight — aim to add a rep or two before the next bump.`;
-          }
-        }
-        basedOnActualSets = lastSession.length >= 2;
-      } else {
-        // Only heavy low-rep attempts on record for this exercise — estimate an 8-12 rep starting
-        // weight from the best tested max instead of prescribing the max weight itself.
-        const bestEntry = hist.reduce((best, e) => (estE1RM(e.weight, e.reps) > estE1RM(best.weight, best.reps) ? e : best), hist[0]);
-        const e1rm = estE1RM(bestEntry.weight, bestEntry.reps);
-        nextTopWeight = roundTo5(e1rm / (1 + repLow / 30));
-        lastTop = bestEntry;
-        lastSessionDate = bestEntry.date;
-        lastSession = [bestEntry];
-        note = `Only low-rep attempts logged for this exercise (best: ${bestEntry.weight} lbs × ${bestEntry.reps}) — no 8–12 rep working set on record yet. This starting weight is back-calculated from your estimated max, so treat it as a first guess and adjust by feel.`;
-        basedOnActualSets = false;
-      }
-    } else {
-      // No logged history at all — build a first recommendation straight from a reported strongest set.
-      const w = Number(manualWeight), r = Number(manualReps);
-      const e1rm = estE1RM(w, r);
-      nextTopWeight = roundTo5(e1rm / (1 + repLow / 30));
-      lastTop = { weight: w, reps: r };
-      lastSessionDate = null;
-      lastSession = [lastTop];
-      note = `Based on the strongest set you entered (${w} lbs × ${r}) — no logged history yet, so this is a first estimate. Log a real session anytime and this'll switch to using your actual numbers.`;
-      basedOnActualSets = false;
-    }
-
-    let pcts;
-    if (basedOnActualSets) {
-      pcts = lastSession.map((e) => e.weight / lastTop.weight);
-    } else {
-      pcts = [1, 0.9, 0.85, 0.8, 0.75, 0.7];
-    }
-
-    const rows = Array.from({ length: recSets }, (_, i) => {
-      const pct = pcts[i] !== undefined ? pcts[i] : pcts[pcts.length - 1];
-      const raw = nextTopWeight * pct;
-      const w = Math.round(raw / 5) * 5;
-      return { set: i + 1, weight: w };
+  // The visible window starts from the day BEFORE the range begins (like a prior close), so the
+  // change shown is the change across the whole range. The moving average is computed over the full
+  // history, so it is already warm when the window starts.
+  const portfolioView = useMemo(() => {
+    const rows = portfolioSeries.rows;
+    if (rows.length < 2) return null;
+    const cutoff = rangeCutoffISO(portfolioRange);
+    let startIdx = rows.findIndex((r) => r.date >= cutoff);
+    if (startIdx === -1) startIdx = rows.length - 2;
+    if (startIdx > 0) startIdx -= 1;
+    if (rows.length - startIdx < 2) startIdx = rows.length - 2;
+    const base = rows[startIdx].value;
+    const maDays = (MA_OPTIONS.find((m) => m.key === maKey) || {}).days || 0;
+    const maRaw = rows.map((_, i) => {
+      if (!maDays || i < maDays - 1) return null;
+      let sum = 0;
+      for (let k = i - maDays + 1; k <= i; k++) sum += rows[k].value;
+      return sum / maDays;
     });
+    const pctOf = (v) => Math.round(((v - base) / base) * 10000) / 100;
+    const slice = rows.slice(startIdx);
+    const display = slice.map((r) => ({ date: r.date, label: r.label, value: pctOf(r.value) }));
+    const maDisplay = maRaw.slice(startIdx).map((v) => (v === null ? null : pctOf(v)));
+    const last = rows[rows.length - 1];
+    const maLast = maRaw[rows.length - 1];
+    const pct = pctOf(last.value);
+    return {
+      display, maDisplay, pct, up: pct >= 0,
+      vsAvg: maLast ? Math.round(((last.value - maLast) / maLast) * 1000) / 10 : null,
+      maLabel: (MA_OPTIONS.find((m) => m.key === maKey) || {}).label,
+    };
+  }, [portfolioSeries, portfolioRange, maKey]);
 
-    return { noData: false, lastTop, lastSessionDate, nextTopWeight, note, rows, repLow, repHigh, basedOnActualSets, fromManual: !hist || !hist.length };
-  }, [recExercise, recSets, entriesByExerciseStrength, manualWeight, manualReps, progressionMode]);
+  // ---- Progress section data ------------------------------------------------------------------------
+  // One point per day: the best set of that day for the chosen metric (est. 1RM or top weight).
+  const chartResult = useMemo(() => {
+    if (!chartFocusExercise) return { rows: [], series: [] };
+    const cutoff = rangeCutoffISO(chartRange);
+    const bw = bodyweightInfo(entriesByExercise[chartFocusExercise] || [], settings.bodyWeight);
+    const metric = bw.repsMode ? "reps" : chartMetric === "e1rm" ? "e1rm" : "weight";
+    const src = bw.isBw ? bw.list : (entriesByExerciseStrength[chartFocusExercise] || []);
+    const inRange = src.filter((e) => e.date >= cutoff);
+    const byDate = {};
+    inRange.forEach((e) => { byDate[e.date] = pickBest(byDate[e.date], e, metric); });
+    const rows = Object.keys(byDate).sort().map((date) => {
+      const entry = byDate[date];
+      return { date, label: fmtDate(date), [chartFocusExercise]: bw.repsMode ? entry.reps : (bw.hasBw && metric === "weight" ? W(entry.added) : W(setScore(entry, metric))), [`${chartFocusExercise}__r`]: entry.reps, [`${chartFocusExercise}__s`]: entry.sets };
+    });
+    return { rows, series: [chartFocusExercise] };
+  }, [entriesByExerciseStrength, entriesByExercise, chartRange, chartMetric, chartFocusExercise, unit, settings.bodyWeight]);
 
-  const [goalExercise, setGoalExercise] = useState(null);
-  const [goalWeight, setGoalWeight] = useState("");
-  const [goalCurrentMax, setGoalCurrentMax] = useState("");
-  const [goalWeeks, setGoalWeeks] = useState(5);
-  const [goalDaysPerWeek, setGoalDaysPerWeek] = useState(2);
-  const [goalMaxTouched, setGoalMaxTouched] = useState(false);
+  const alreadyImported = entries.some((e) => String(e.id).startsWith("import-v1-"));
+  const runImport = () => {
+    if (alreadyImported) return;
+    const nextExercises = JSON.parse(JSON.stringify(exercises));
+    const newEntries = IMPORT_DATA.map((d, i) => {
+      const list = nextExercises[d.workoutId] || (nextExercises[d.workoutId] = []);
+      if (!list.some((e) => e.toLowerCase() === d.exercise.toLowerCase())) list.push(d.exercise);
+      return { id: `import-v1-${i}`, workoutId: d.workoutId, exercise: d.exercise, weight: d.weight, sets: d.sets, reps: d.reps, date: d.date };
+    });
+    persist({ workouts, exercises: nextExercises, entries: [...newEntries, ...entries] });
+  };
 
+  const alreadyImportedIncline = entries.some((e) => String(e.id).startsWith("import-incline-"));
+  const runInclineImport = () => {
+    if (alreadyImportedIncline) return;
+    const nextExercises = JSON.parse(JSON.stringify(exercises));
+    const newEntries = INCLINE_IMPORT_DATA.map((d, i) => {
+      const list = nextExercises[d.workoutId] || (nextExercises[d.workoutId] = []);
+      if (!list.some((e) => e.toLowerCase() === d.exercise.toLowerCase())) list.push(d.exercise);
+      return { id: `import-incline-${i}`, workoutId: d.workoutId, exercise: d.exercise, weight: d.weight, sets: d.sets, reps: d.reps, date: d.date };
+    });
+    persist({ workouts, exercises: nextExercises, entries: [...newEntries, ...entries] });
+  };
+
+  const triggerDownload = (content, filename, type) => {
+    const blob = new Blob([content], { type });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = filename; a.click();
+    URL.revokeObjectURL(url);
+  };
+  const exportJSON = () => {
+    const payload = JSON.stringify({ workouts, exercises, entries, exportedAt: new Date().toISOString() }, null, 2);
+    triggerDownload(payload, `hooks-workout-backup-${todayISO()}.json`, "application/json");
+  };
+  const exportCSV = () => {
+    const workoutName = (id) => workouts.find((w) => w.id === id)?.name || id;
+    const esc = (v) => (typeof v === "string" && v.includes(",")) ? `"${v}"` : v;
+    const header = "Date,Workout,Exercise,Weight,Sets,Reps,Est1RM";
+    const rows = [...entries].sort((a, b) => (a.date < b.date ? -1 : 1)).map((e) =>
+      [e.date, esc(workoutName(e.workoutId)), esc(e.exercise), e.weight, e.sets, e.reps, e1(e)].join(",")
+    );
+    triggerDownload([header, ...rows].join("\n"), `hooks-workout-sets-${todayISO()}.csv`, "text/csv");
+  };
+
+  // ---- Exercise page (opened from a history date or a carousel card) ----------------------------------
+  const [xpage, setXpage] = useState(null);        // { exercise, date, ytd }
+  const [xEdit, setXEdit] = useState(false);
+  const [xScrub, setXScrub] = useState(null);
+  const [undoDel, setUndoDel] = useState(null);     // { entry, index }
+  const [fillSlip, setFillSlip] = useState(null);   // trade-confirmation style receipt after logging a set
+  const fillTimer = useRef(null);
+  const undoTimer = useRef(null);
+  const openExercise = (exercise, date, ytd, range) => { setXpage({ exercise, date, ytd: !!ytd, range: range || (ytd ? "ytd" : "all") }); setXEdit(false); setXScrub(null); setEditingId(null); };
+  const closeExercise = (e) => slideOut(e, closeExerciseNow);
+  const slideOut = (e, fn) => { const el = e && e.currentTarget && e.currentTarget.closest ? e.currentTarget.closest(".xpage") : null; if (!el || (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches)) { fn(); return; } if (el.classList.contains("leaving")) return; el.classList.add("leaving"); setTimeout(fn, 300); };
+  const closeExerciseNow = () => { setXpage(null); setXEdit(false); setXScrub(null); setEditingId(null); };
   useEffect(() => {
-    if (!goalExercise) return;
-    const hist = entriesByExerciseStrength[goalExercise];
-    if (hist && hist.length && !goalMaxTouched) {
-      const best = hist.reduce((m, e) => Math.max(m, estE1RM(e.weight, e.reps)), 0);
-      setGoalCurrentMax(String(roundTo5(best)));
-    }
-  }, [goalExercise, entriesByExerciseStrength, goalMaxTouched]);
+    if (!xpage) return undefined;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => { document.body.style.overflow = prev; };
+  }, [!!xpage]);
+  const xData = useMemo(() => {
+    if (!xpage) return null;
+    const raw = entriesByExercise[xpage.exercise] || [];
+    const bwInfo = bodyweightInfo(raw, settings.bodyWeight);
+    const list = bwInfo.list;
+    const today = todayISO();
+    const xr = xRangeOf(xpage);
+    const from = xr === "all" ? "0000-01-01" : rangeCutoffISO(xr);
+    const to = xr === "all" ? xpage.date : today;
+    const series = buildExSeries(list, from, to, bwInfo.repsMode);
+    const dayEntries = raw.filter((e) => e.date === xpage.date);
+    return { list, series, dayEntries, bw: bwInfo, summary: exSummary(xpage.exercise, series, list.filter((e) => e.date >= from && e.date <= to), X_RANGE_PER[xr], W, bwInfo.repsMode) };
+  }, [xpage, entriesByExercise, unit, settings.bodyWeight]);
+  const xStats = useMemo(() => {
+    if (!xpage) return null;
+    const bwInfo = bodyweightInfo(entriesByExercise[xpage.exercise] || [], settings.bodyWeight);
+    const today = todayISO();
+    const xr = xRangeOf(xpage);
+    return exStats(bwInfo.list, xr === "all" ? "0000-01-01" : rangeCutoffISO(xr), xr === "all" ? xpage.date : today, bwInfo.repsMode);
+  }, [xpage, entriesByExercise, settings.bodyWeight]);
 
-  const goalProgram = useMemo(() => {
-    if (!goalExercise || !goalWeight || !goalCurrentMax || !goalWeeks) return null;
-    const cur = Number(goalCurrentMax), goal = Number(goalWeight), weeks = Number(goalWeeks);
-    if (!cur || !goal || !weeks) return null;
-    if (goal <= cur) return { error: "Goal weight should be higher than your current max." };
-    const rows = [];
-    for (let w = 1; w <= weeks; w++) {
-      const t = w / weeks;
-      const heavyWeight = roundTo5(cur + (goal - cur) * t);
-      // Reps taper by week progression (assuming your real strength is rising in step with the
-      // program), not by weight-vs-goal — that comparison breaks the moment the prescribed
-      // weight is above your current max, which happens almost every week by design.
-      const weekFrac = weeks > 1 ? (w - 1) / (weeks - 1) : 1;
-      const heavyReps = Math.max(1, Math.round(6 - 5 * weekFrac));
-      const heavySets = heavyReps <= 2 ? 1 : 3;
-      const week = { week: w, heavy: { weight: heavyWeight, reps: heavyReps, sets: heavySets } };
-      if (goalDaysPerWeek === 2) {
-        const lightWeight = roundTo5(cur + (goal - cur) * t * 0.8);
-        const lightSets = w === weeks ? 1 : 3;
-        week.light = { weight: lightWeight, reps: 5, sets: lightSets };
-      }
-      rows.push(week);
-    }
-    return { rows };
-  }, [goalExercise, goalWeight, goalCurrentMax, goalWeeks, goalDaysPerWeek]);
+  // ---- Carousel: pull down at the top of Overall to see each lift's year-to-date change ----
+  const [carouselOpen, setCarouselOpen] = useState(false);
+  const carouselItems = useMemo(() => {
+    const today = todayISO(), from = `${today.slice(0, 4)}-01-01`;
+    const items = [];
+    Object.entries(entriesByExerciseStrength).forEach(([name, list]) => {
+      const ser = buildExSeries(list, from, today);
+      if (ser) items.push({ name, pct: ser.pct, e1rm: ser.e1rmNow, last: list[0].date });
+    });
+    items.sort((a, b) => (a.last < b.last ? 1 : -1));
+    return items.slice(0, 12);
+  }, [entriesByExerciseStrength]);
+  const allLiftsYtd = useMemo(() => {
+    const rows = portfolioSeries.rows;
+    if (rows.length < 2) return null;
+    const from = `${todayISO().slice(0, 4)}-01-01`;
+    let i = rows.findIndex((r) => r.date >= from);
+    if (i === -1) return null;
+    if (i > 0) i -= 1;
+    if (rows.length - i < 2) return null;
+    return Math.round(((rows[rows.length - 1].value - rows[i].value) / rows[i].value) * 1000) / 10;
+  }, [portfolioSeries]);
+  const pull = useRef(null);
+  const chartTap = useRef(null);
+  const pullY0 = useRef(0);
+  const pullX0 = useRef(0);
+  const pullAtTop = useRef(false);
+  const onPullStart = (e) => { pullY0.current = e.touches[0].clientY; pullX0.current = e.touches[0].clientX; pullAtTop.current = window.scrollY <= 1; pull.current = window.scrollY <= 0 ? e.touches[0].clientY : null; };
+  const TITLE_MAX = 64;
+  const [titlePull, setTitlePull] = useState(0);
+  const [titleDrag, setTitleDrag] = useState(false);
+  const onPullMove = (e) => {
+    const y = e.touches[0].clientY;
+    // A short upward swipe anywhere near the top puts the cards away again.
+    // Only a clearly vertical, upward swipe puts the cards away. Sideways swipes through the tickers never do.
+    const ddx = Math.abs(e.touches[0].clientX - pullX0.current), ddy = y - pullY0.current;
+    if (carouselOpen && pullAtTop.current && ddy < -70 && -ddy > ddx * 2.5) { setCarouselOpen(false); pull.current = null; setTitlePull(0); return; }
+    if (pull.current === null || window.scrollY > 0) return;
+    const dy = y - pull.current;
+    if (dy > 56) setCarouselOpen(true);
+    // Keep pulling past the cards and the app title shows, bottom first.
+    const t = Math.min(TITLE_MAX, Math.max(0, (dy - 110) * 0.9));
+    setTitleDrag(true);
+    setTitlePull((cur) => (Math.abs(cur - t) > 1 ? t : cur));
+  };
+  const onPullEnd = () => { setTitleDrag(false); setTitlePull(0); };
+
+  // One-time start-up: the line draws in, the dots fall in from the top, and the text types itself out.
+  const [introOn, setIntroOn] = useState(() => !introPlayed && !(typeof window !== "undefined" && window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches));
+  const introStarted = useRef(false);
+  const introReady = !!(loaded && portfolioView);
+  useIsoLayoutEffect(() => {
+    if (!introOn || !introReady || introStarted.current) return undefined;
+    introStarted.current = true;
+    introPlayed = true;
+    typeIn(sectionRefs.current.portfolio);
+    const t = setTimeout(() => setIntroOn(false), 1500);
+    return () => clearTimeout(t);
+  }, [introOn, introReady]);
+
+  if (passcode === null) return null;
+
+  if (!passcode) {
+    return (
+      <div className="login-wrap">
+        <div className="login-card">
+          <div className="eyebrow"><span className="dot">●</span> Hooks Workout</div>
+          <div style={{ fontSize: "var(--fs-title)", fontWeight: 600, marginTop: 8 }}>Enter Passcode</div>
+          {authError && <div className="warn" style={{ marginTop: 12 }}>{authError}</div>}
+          <input type="password" placeholder="Passcode" value={passInput} onChange={(e) => setPassInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submitPasscode()} />
+          <button className="btn-iron" onClick={submitPasscode}>Unlock</button>
+        </div>
+      </div>
+    );
+  }
+
+  const repsText = (low, high) => (low === high ? `${low}` : `${low}–${high}`);
+  const focusHistory = chartFocusExercise ? (entriesByExercise[chartFocusExercise] || []) : [];
+  const shownHistory = historyAll ? focusHistory : focusHistory.slice(0, demoRef.current ? 4 : 10);
+  const mergeCandidates = chartFocusExercise ? allExerciseNames.filter((n) => n !== chartFocusExercise && (entriesByExercise[n] || []).length > 0) : [];
+  const maWords = { "30": "30-day", "90": "90-day", "365": "1-year" };
+
+  const renderEditableRow = (e, compact) => (
+    editingId === e.id ? (
+      <div key={e.id} className={compact ? "hist-item" : "today-item"} style={{ flexWrap: "wrap", gap: 4 }}>
+        <span className="muted" style={{ fontSize: "var(--fs-label)" }}>{fmtDate(e.date)}</span>
+        <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
+          <input type="number" inputMode="decimal" value={editForm.weight} onChange={(ev) => setEditForm({ ...editForm, weight: ev.target.value })} style={{ width: 52, padding: "4px 4px", fontSize: "var(--fs-label)" }} />
+          <span className="muted" style={{ fontSize: "var(--fs-label)" }}>{unit} ×</span>
+          <input type="number" inputMode="numeric" value={editForm.reps} onChange={(ev) => setEditForm({ ...editForm, reps: ev.target.value })} style={{ width: 40, padding: "4px 4px", fontSize: "var(--fs-label)" }} />
+          {(e.sets || 1) > 1 && (<>
+            <span className="muted" style={{ fontSize: "var(--fs-label)" }}>×</span>
+            <input type="number" inputMode="numeric" value={editForm.sets} onChange={(ev) => setEditForm({ ...editForm, sets: ev.target.value })} style={{ width: 40, padding: "4px 4px", fontSize: "var(--fs-label)" }} />
+          </>)}
+          <button className="del-btn" onClick={() => saveEdit(e.id)} style={{ color: "var(--gain)", fontWeight: 600 }}>✓</button>
+          <button className="del-btn" onClick={cancelEdit}>✕</button>
+        </span>
+      </div>
+    ) : compact ? (
+      <SwipeRow key={e.id} onEdit={() => startEdit(e)} onDelete={() => deleteEntry(e.id)}>
+        <div className="hist-item hist-simple" style={{ opacity: e.isWarmup ? 0.6 : 1 }}>
+          <button type="button" className="hist-date" onClick={() => openExercise(e.exercise, e.date, false)} aria-label={`Open ${e.exercise} through ${fmtDate(e.date)}`}>{fmtDate(e.date)}</button>
+          <span className="hist-nums">{setWt(e, W, unit, bwNames.has(e.exercise))} · {e.reps > 0 ? e.reps : 0} reps · {e.sets || 1} {(e.sets || 1) === 1 ? "set" : "sets"}{e.side && <span className="muted"> · {e.side === "L" ? "left" : "right"}</span>}{e.brand && <span className="muted"> · {e.brand}</span>}{e.isWarmup && <span className="muted"> · warm-up</span>}</span>
+        </div>
+      </SwipeRow>
+    ) : (
+      <div key={e.id} className={compact ? "hist-item" : "today-item"} style={{ opacity: e.isWarmup ? 0.6 : 1 }}>
+        {compact
+          ? <span className="muted" style={{ fontSize: "var(--fs-label)" }}>{fmtDate(e.date)}</span>
+          : <span style={{ fontWeight: 600 }}>{e.exercise}{e.side && <span className="muted" style={{ fontSize: "var(--fs-label)", fontWeight: 400 }}> ({e.side === "L" ? "left" : "right"})</span>}{e.isWarmup && <span className="muted" style={{ fontSize: "var(--fs-label)", fontWeight: 400 }}> (warm-up)</span>}</span>}
+        <span className="num">
+          {bwNames.has(e.exercise) ? setWt(e, W, unit, true) : <>{W(e.weight)}<span className="muted">{unit}</span></>}{e.reps > 0 && <span className="muted">× {e.reps}{e.sets > 1 ? ` × ${e.sets}` : ""}</span>}
+          {compact && e.isWarmup && <span className="muted" style={{ fontSize: "var(--fs-label)" }}>(warm-up)</span>}
+          <button className="del-btn" onClick={() => startEdit(e)} title="Edit" aria-label="Edit set">✎</button>
+          <button className="del-btn" onClick={() => toggleWarmup(e.id)} title={e.isWarmup ? "Mark as working set" : "Mark as warm-up"} style={{ fontSize: "var(--fs-label)", fontWeight: 600, color: e.isWarmup ? "var(--text-primary)" : "var(--text-secondary)" }}>W</button>
+          <button className="del-btn del-x" onClick={() => deleteEntry(e.id)} aria-label="Delete set"><span className="x-circle">✕</span></button>
+        </span>
+      </div>
+    )
+  );
 
   return (
     <>
     <DotField />
     <div className="wrap">
-      {loaded && (
-        <div className="demo-bar">
-          <span>Demo · sample data, saved only on this device</span>
-          <button onClick={resetDemo}>Reset</button>
-        </div>
-      )}
-
-      {loaded && showInstallTip && (
-        <div className="install-tip">
-          <div className="install-tip-body">
-            <b>Add it to your Home Screen</b>
-            <span>
-              Tap the Share button{" "}
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ verticalAlign: "-3px" }}><path d="M12 15V3" /><path d="M8 7l4-4 4 4" /><path d="M7 11H6a1 1 0 00-1 1v8a1 1 0 001 1h12a1 1 0 001-1v-8a1 1 0 00-1-1h-1" /></svg>
-              {" "}in Safari, scroll down, tap <b>Add to Home Screen</b>, then <b>Add</b>. It opens full screen like an app.
-            </span>
-          </div>
-          <button onClick={dismissInstallTip} aria-label="Dismiss">✕</button>
-        </div>
-      )}
+      <div className="status-fade" aria-hidden="true" />
+      <div className="top-bar" style={feedOpen ? { display: "none" } : undefined}><button className="gear-btn" onClick={() => setSettingsOpen(true)} aria-label="Settings"><IconGear size={22} /></button></div>
 
       {saveError && <div className="warn">{saveError}</div>}
+      {pendingSync && !saveError && <div className="sync-note">Offline or saving. Your changes are kept on this phone and sync automatically.</div>}
 
       {!loaded ? (
         <div className="empty">Loading your log…</div>
       ) : (
         <>
-        <div ref={(el) => (sectionRefs.current.portfolio = el)}>
-        <>
-          <div className="ticker-wrap" style={{ marginTop: 0 }}>
-            {tickerSeries.length === 0 ? (
-              <div className="ticker-empty">Log 3+ sessions of an exercise to see it here.</div>
-            ) : (
-              <div
-                className="ticker-track-outer"
-                ref={tickerOuterRef}
-                style={{ cursor: "grab" }}
-                onPointerDown={tickerPointerDown}
-                onPointerMove={tickerPointerMove}
-                onPointerUp={tickerPointerUp}
-                onPointerLeave={tickerPointerUp}
-                onTouchStart={pauseTicker}
-                onTouchEnd={scheduleTickerResume}
-              >
-                <div className="ticker-track" ref={tickerTrackRef}>
-                  {[...tickerSeries, ...tickerSeries].map((s, i) => (
-                    <TickerItem key={i} series={s} onClick={() => { setChartFocusExercise(s.exercise); scrollToSection("charts"); }} />
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-
-          <div className="chart-carousel" style={{ marginTop: 6 }} ref={carouselRef} onScroll={onCarouselScroll} onPointerDown={resetCarouselAutoplay} onTouchStart={resetCarouselAutoplay}>
-            <div className="chart-carousel-page">
-              <div className="label-sm" style={{ textAlign: "center", marginBottom: 10 }}>Your Strength Over Time</div>
-              <div className="portfolio-change">
-                {(() => {
-                  const allRows = portfolioSeries.rows;
-                  const curIndex = scrubPoint ? scrubPoint.index : (allRows.length ? allRows[allRows.length - 1].value : null);
-                  const pct = scrubPoint ? scrubPoint.value : portfolioChange?.pct;
-                  if (curIndex === null || curIndex === undefined) return <span className="cap">Not enough data yet</span>;
-                  const up = (pct ?? 0) >= 0;
-                  const rangeLabel = RANGE_PRESETS.find((r) => r.key === portfolioRange)?.label;
-                  return (
-                    <>
-                      <span className="index-num">{Number(curIndex).toFixed(1)}</span>
-                      <span className="index-meta">
-                        <span style={{ color: up ? "#22c55e" : "#ef4444" }}>{up ? "▲" : "▼"} {Math.abs(pct ?? 0)}%</span>
-                        <span className="cap">{scrubPoint ? scrubPoint.label : rangeLabel}</span>
-                      </span>
-                      <span className="index-tag">Strength Index · {portfolioSeries.exerciseCount} lifts</span>
-                    </>
-                  );
-                })()}
-              </div>
-
-              <div className="chart-box">
-                <PortfolioChart rows={portfolioDisplayRows} color={portfolioChange?.up === false ? "#ef4444" : "#22c55e"} onScrub={setScrubPoint} onSwipeStart={onChartSwipeStart} onSwipeMove={onChartSwipeMove} onSwipeEnd={onChartSwipeEnd} />
-              </div>
-              <div className="axis-caption">Hold and drag along the line to see any date. Index starts at 100 on your first logged day; the % is the change since the start of this range.</div>
-
-              <div className="pills">
-                {RANGE_PRESETS.map((r) => (
-                  <button key={r.key} className={"pill" + (r.key === portfolioRange ? " active" : "")} onClick={() => { setPortfolioRange(r.key); setScrubPoint(null); }}>{r.label}</button>
-                ))}
-              </div>
-            </div>
-
-            <div className="chart-carousel-page">
-              <div className="label-sm" style={{ textAlign: "center", marginBottom: 6 }}>Strength growth by category</div>
-              <div className="chart-slot">
-              <RadarChart data={radarData} onTap={() => setRadarInfoOpen((v) => !v)} />
-              {radarInfoOpen && allTimeRange && (
-                <div style={{ textAlign: "center", fontSize: 12, fontWeight: 700, color: "var(--iron)", marginBottom: 4 }}>
-                  {fmtDate(allTimeRange.start)} – {fmtDate(allTimeRange.end)}
-                </div>
-              )}
-              </div>
-              <div className="axis-caption">Average % change in estimated 1RM across each workout's exercises, all-time — tap the chart for the exact span, hollow points mean not enough data yet</div>
-            </div>
-
-            <div className="chart-carousel-page">
-              <div className="label-sm" style={{ textAlign: "center", marginBottom: 6 }}>Weekly training volume</div>
-              <div className="chart-slot">
-              <VolumeBarChart weeks={weeklyVolume} onTapBar={(w) => setVolumeTapInfo(w)} />
-              {volumeTapInfo && (
-                <div style={{ textAlign: "center", fontSize: 12, fontWeight: 700, color: "var(--iron)", marginBottom: 4 }}>
-                  {volumeTapInfo.label}: {fmtDate(volumeTapInfo.start)} – {fmtDate(volumeTapInfo.end)}
-                </div>
-              )}
-              </div>
-              <div className="axis-caption">Total weight × sets × reps logged each week, last 10 weeks (this week in blue) — tap a bar for its exact dates</div>
-            </div>
-
-            <div className="chart-carousel-page">
-              <div className="label-sm" style={{ textAlign: "center", marginBottom: 6 }}>Training consistency</div>
-              <div className="chart-slot">
-              <ConsistencyHeatmap weeks={heatmapWeeks} onTap={() => setHeatmapInfoOpen((v) => !v)} />
-              {heatmapInfoOpen && heatmapWeeks.length > 0 && (
-                <div style={{ textAlign: "center", fontSize: 12, fontWeight: 700, color: "var(--iron)", marginBottom: 4 }}>
-                  {fmtDate(heatmapWeeks[0][0].date)} – {fmtDate(heatmapWeeks[heatmapWeeks.length - 1][6].date)}
-                </div>
-              )}
-              </div>
-              <div className="axis-caption">Darker = more sets logged that day, last 10 weeks — tap the grid for the exact span</div>
+        {/* ---------------- OVERALL ---------------- */}
+        <div ref={(el) => (sectionRefs.current.portfolio = el)} className="overall-screen" onTouchStart={onPullStart} onTouchMove={onPullMove} onTouchEnd={onPullEnd} onTouchCancel={onPullEnd}>
+          <DotTitle text={APP_TITLE} height={titlePull} dragging={titleDrag} progress={titlePull / TITLE_MAX} />
+          <button type="button" className={"pull-cue" + (carouselOpen ? " open" : "")} onClick={() => setCarouselOpen((v) => !v)} aria-label={carouselOpen ? "Hide exercises" : "Show exercises"}>
+            <span className="pc-text">Exercises</span><svg width="20" height="12" viewBox="0 0 20 12" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M3 3l7 6 7-6" /></svg>
+          </button>
+          <div className={"carousel" + (carouselOpen ? " open" : "")} aria-hidden={!carouselOpen}
+            onTouchStart={() => { pull.current = null; }}>
+            <div className="carousel-row">
+              <button type="button" className="carousel-card all" tabIndex={carouselOpen ? 0 : -1} onClick={() => setCarouselOpen(false)}>
+                <span className="cc-name">All exercises</span>
+                <span className="cc-val">Overall</span>
+                <span className="cc-pct" style={{ color: allLiftsYtd === null ? "var(--text-tertiary)" : allLiftsYtd >= 0 ? "var(--gain)" : "var(--loss)" }}>{allLiftsYtd === null ? "n/a" : `${allLiftsYtd >= 0 ? "▲" : "▼"} ${Math.abs(allLiftsYtd).toFixed(1)}%`}</span>
+              </button>
+              {carouselItems.map((it) => (
+                <button key={it.name} type="button" className="carousel-card" tabIndex={carouselOpen ? 0 : -1} onClick={() => openExercise(it.name, it.last, true)}>
+                  <span className="cc-name">{tickerOf(it.name)}</span>
+                  <span className="cc-val">{W(it.e1rm)} est. max</span>
+                  <span className="cc-pct" style={{ color: it.pct >= 0 ? "var(--gain)" : "var(--loss)" }}>{it.pct >= 0 ? "▲" : "▼"} {Math.abs(it.pct).toFixed(1)}%</span>
+                </button>
+              ))}
             </div>
           </div>
-
-          <div className="carousel-dots">
-            {[0, 1, 2, 3].map((i) => <div key={i} className={"carousel-dot" + (carouselPage === i ? " active" : "")} />)}
+          <div className="portfolio-change">
+            {!portfolioView ? <span className="cap">Not enough data yet</span> : (() => {
+              const pct = scrubPoint ? scrubPoint.value : portfolioView.pct;
+              const up = pct >= 0;
+              const rangeLabel = RANGE_PRESETS.find((r) => r.key === portfolioRange)?.label;
+              return (
+                <>
+                  {settings.dotNums !== false
+                    ? <DotNum text={`${up ? "+" : "-"}${Math.abs(pct).toFixed(1)}%`} color={up ? "var(--gain)" : "var(--loss)"} intro={introOn} />
+                    : <span className="index-num" style={{ color: up ? "var(--gain)" : "var(--loss)" }}>{up ? "+" : "−"}{Math.abs(pct).toFixed(1)}%</span>}
+                  <span className="index-meta"><span className="cap">{scrubPoint ? scrubPoint.label : rangeLabel}</span></span>
+                  {!scrubPoint && <span className="plain-line">{`Your strength is ${up ? "up" : "down"} ${Math.abs(pct).toFixed(1)}% ${portfolioRange === "all" ? "all time" : "over " + (RANGE_WORDS[portfolioRange] || "this range")}.`}</span>}
+                </>
+              );
+            })()}
+            <span className="unit-pill" role="group" aria-label="Weight unit">
+              <button type="button" className={unit === "lbs" ? "on" : ""} aria-pressed={unit === "lbs"} onClick={() => changeUnit("lbs")}>lbs</button>
+              <span className="unit-sep" aria-hidden="true">/</span>
+              <button type="button" className={unit === "kg" ? "on" : ""} aria-pressed={unit === "kg"} onClick={() => changeUnit("kg")}>kg</button>
+            </span>
           </div>
 
-          {(insights.length > 0 || fluctuationInsight) && (() => {
-            const allInsights = [...(fluctuationInsight ? [fluctuationInsight] : []), ...insights];
-            const ins = allInsights[insightIndex % allInsights.length];
-            const dotColor = ins.type === "up" || ins.type === "strongest" || ins.type === "pr" ? "#22c55e" : ins.type === "down" ? "#ef4444" : "var(--iron)";
-            return (
-              <div style={{ marginTop: 18 }}>
-                <div className="label-sm" style={{ marginBottom: 10 }}>Insights</div>
-                <div className="insight-item">
-                  <span className="dot" style={{ background: dotColor }} />
-                  <span>{ins.text}</span>
-                </div>
-                {allInsights.length > 1 && (
-                  <div style={{ display: "flex", gap: 4, marginTop: 2 }}>
-                    {allInsights.map((_, i) => <span key={i} style={{ width: 5, height: 5, borderRadius: 999, background: i === insightIndex % allInsights.length ? "var(--iron)" : "var(--border)" }} />)}
-                  </div>
-                )}
-              </div>
-            );
-          })()}
+          <div className="chart-box">
+            {portfolioView
+              ? <PortfolioChart rows={portfolioView.display} maRows={maKey === "off" ? null : portfolioView.maDisplay} color={portfolioView.up ? "var(--gain)" : "var(--loss)"} onScrub={setScrubPoint} intro={introOn} />
+              : <div className="empty">Log sessions on a few exercises to see this.</div>}
+          </div>
+          {portfolioView && maKey !== "off" && (
+            <div className="ma-readout">
+              <span className="ma-swatch" />
+              {portfolioView.vsAvg === null
+                ? `${maWords[maKey]} average starts after ${maWords[maKey].replace("-day", " days").replace("1-year", "a year")} of history`
+                : `${portfolioView.vsAvg >= 0 ? "▲" : "▼"} ${Math.abs(portfolioView.vsAvg).toFixed(1)}% ${portfolioView.vsAvg >= 0 ? "above" : "below"} its ${maWords[maKey]} average`}
+            </div>
+          )}
+
+          <div className="pills range-tabs" style={{ marginBottom: 0 }}>
+            {RANGE_PRESETS.map((r) => (
+              <button key={r.key} className={"pill" + (r.key === portfolioRange ? " active" : "")} onClick={() => { setPortfolioRange(r.key); setScrubPoint(null); }}><span className="tab-l">{r.label}</span></button>
+            ))}
+          </div>
+          <button type="button" className={"compare-chip" + (compareOpen ? " on" : "")} aria-expanded={compareOpen} onClick={() => setCompareOpen((v) => !v)}>{compareOpen ? "Hide average" : "Compare to your average"}</button>
+          {compareOpen && <div className="pills pills-sub">
+            {MA_OPTIONS.filter((m) => m.key !== "off").map((m) => (
+              <button key={m.key} className={"pill pill-sm" + (m.key === maKeyRaw ? " active" : "")} onClick={() => setMaKey(m.key)}><span className="tab-l">{m.label}</span></button>
+            ))}
+          </div>}
 
           <button className="log-set-row" onClick={() => scrollToSection("home")}>
             <span>Log a set</span>
-            <span style={{ color: "var(--mute)", fontSize: 20 }}>›</span>
+            <span className="lsr-due">{dueWorkout ? `${dueWorkout.workout.name} is due · ${dueWorkout.days === Infinity ? "never done" : dueWorkout.days === 1 ? "1 day" : `${dueWorkout.days} days`}` : ""} ›</span>
           </button>
-        </>
+
+          <div className="digest-card2" onClick={() => setDigestOpen((o) => !o)} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") setDigestOpen((o) => !o); }}>
+            <div className="insights-head">
+              <span className="label-sm" style={{ marginBottom: 0 }}>Lifter's Digest{aiDigest ? <span className="ai-tag">AI</span> : null}</span>
+              <span className="insight-count">{digestOpen ? "less" : "more"}</span>
+            </div>
+            {[["last", "Last workout", "var(--text-secondary)"], ["up", "Improving", "var(--gain)"], ["down", "Slipping or flat", "var(--loss)"], ["due", "Due soon", "var(--text-secondary)"]].filter(([k]) => digestOpen || k === "last" || k === "up").map(([k, label, col]) => (
+              <div key={k} className="dg-sec">
+                <div className="dg-label" style={{ color: col }}>{label}</div>
+                <div className={"dg-text" + (digestOpen ? " open" : "")}>{digest[k]}</div>
+              </div>
+            ))}
+            {digestOpen && <div className="week-tiles dg-tiles">
+              {dayStats.map((d) => (
+                <button key={d.workout.id} className={"week-tile" + (dueWorkout && dueWorkout.workout.id === d.workout.id ? " due" : "")} onClick={(ev) => { ev.stopPropagation(); scrollToSection("home"); startDay(d.workout.id); }}>
+                  <span className="wt-name">{d.workout.name}</span>
+                  <span className="wt-ago">{d.days === Infinity ? "never" : d.days === 0 ? "today" : `${d.days}d ago`}</span>
+                </button>
+              ))}
+            </div>}
+          </div>
+
         </div>
 
-        <div ref={(el) => (sectionRefs.current.home = el)} style={{ marginTop: 40, paddingTop: 24, borderTop: "1px solid var(--border)" }}>
-        <>
-          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 14 }}>
-            <button className="title-btn" onClick={() => setShowWorkoutMenu((v) => !v)} style={{ marginBottom: 0 }}>
-              {activeWorkout?.name}
-              <span style={{ color: "var(--mute)", fontSize: 18 }}>▾</span>
-            </button>
-            {dueWorkout && (
-              <button className="due-pill" onClick={() => { setActiveWorkoutId(dueWorkout.workout.id); setShowWorkoutMenu(false); }}>
-                Try {dueWorkout.workout.name} · {dueWorkout.days === Infinity ? "never done" : `${dueWorkout.days} days`}
-              </button>
-            )}
-          </div>
-          {showWorkoutMenu && (
-            <div className="dropdown left">
-              {workouts.map((w) => (
-                <button key={w.id} className="item" style={{ color: w.id === activeWorkoutId ? "var(--iron)" : "var(--chalk)" }} onClick={() => { setActiveWorkoutId(w.id); setShowWorkoutMenu(false); }}>{w.name}</button>
-              ))}
-              <div className="new-row">
-                <input value={newWorkoutName} onChange={(e) => setNewWorkoutName(e.target.value)} placeholder="New workout name" style={{ padding: "7px 10px", fontSize: 16, flex: 1 }} />
-                <button className="btn-iron" onClick={createWorkout} style={{ padding: "0 10px" }}>+</button>
-              </div>
-            </div>
-          )}
+        {/* ---------------- WORKOUT (search, today's target, log) ---------------- */}
+        <div ref={(el) => (sectionRefs.current.home = el)} className="workout-section">
           <div className="date-row">
             <button onClick={() => setSelectedDate((d) => shiftDate(d, -1))}>‹</button>
             <button className="date-pill" onClick={() => setCalendarOpen((v) => !v)}>{fmtDateFull(selectedDate)}</button>
@@ -1666,36 +3286,155 @@ export default function Home() {
             {calendarOpen && <CalendarPopup selectedDate={selectedDate} onSelect={setSelectedDate} onClose={() => setCalendarOpen(false)} />}
           </div>
 
-          <button className={"rest-day-btn" + (restDays.includes(selectedDate) ? " active" : "")} onClick={() => toggleRestDay(selectedDate)}>
-            {restDays.includes(selectedDate) ? "✓ Rest day" : "Rest day?"}
-          </button>
-
-          <div className="card">
-            <div className="label-sm">Sets × Reps</div>
+          <div className="card card-tabbed flat">
+            {nextTarget && nextTarget !== swapTarget && (
+              <button className="next-tab" onClick={() => selectExercise(nextTarget)} aria-label={`Next exercise ${nextTarget}`}>
+                <span className="next-tab-text">Next: {nextTarget}</span><span aria-hidden="true">›</span>
+              </button>
+            )}
             <div className="ex-input-wrap">
-              <input className="ex-input" placeholder="Exercise" value={form.exercise} onChange={(e) => { setForm({ ...form, exercise: e.target.value }); setShowSuggestions(true); }} onFocus={(e) => { setShowSuggestions(true); setTimeout(() => e.target.scrollIntoView({ behavior: "smooth", block: "center" }), 300); }} onBlur={() => setTimeout(() => setShowSuggestions(false), 150)} />
+              <input
+                className="ex-input"
+                placeholder="Search exercises"
+                value={form.exercise}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setShowSuggestions(true);
+                  setDupPrompt(null);
+                  const exact = allExerciseNames.find((n) => n.toLowerCase() === val.trim().toLowerCase());
+                  if (exact && exact !== recExercise) { selectExercise(exact); return; }
+                  setForm({ ...form, exercise: val });
+                  if (!exact) setRecExercise(null);
+                }}
+                onFocus={(e) => { setShowSuggestions(true); setTimeout(() => e.target.scrollIntoView({ behavior: (typeof window !== "undefined" && window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) ? "auto" : "smooth", block: "center" }), 300); }}
+                onBlur={() => setTimeout(() => setShowSuggestions(false), 150)}
+              />
+              {form.exercise.trim() && <ClearX label="Clear exercise" onClick={clearForm} />}
               {showSuggestions && suggestions.length > 0 && (
                 <div className="suggestions">
-                  {suggestions.map((s) => <button key={s} onClick={() => { setForm({ ...form, exercise: s }); setShowSuggestions(false); }}>{s}</button>)}
+                  {suggestions.map((s) => (
+                    <button key={s} onClick={() => selectExercise(s)}>{displayEx(s)}</button>
+                  ))}
                 </div>
               )}
             </div>
-            <div className="row3">
-              {[["weight", "lbs", "decimal", 5], ["sets", "sets", "numeric", 1], ["reps", "reps", "numeric", 1]].map(([key, ph, mode, step]) => (
+            {swapTarget && (
+              <div className="nav-row">
+                <button className="swap-btn" onClick={() => selectExercise(swapTarget)} aria-label={`Switch to ${swapTarget}`}>
+                  <span className="swap-icon">⇄</span><span className="swap-text">Switch to {displayEx(swapTarget)}</span>
+                </button>
+              </div>
+            )}
+
+            {recExercise && (() => {
+              const st = exStats(entriesByExerciseStrength[recExercise] || [], "0000-01-01", "9999-12-31");
+              if (!st) return null;
+              return (
+                <div className="st-grid st-mini">
+                  <div className="st-cell"><div className="st-label">e5RM</div><div className="st-val">{W(st.e5rm)}</div></div>
+                  <div className="st-cell"><div className="st-label">Est. max</div><div className="st-val">{W(st.e1rm)}</div></div>
+                  <div className="st-cell"><div className="st-label">Last set</div><div className="st-val">{st.lastSet.bw ? setWt(st.lastSet, W, unit).replace(` ${unit}`, "") : W(st.lastSet.weight)} × {st.lastSet.reps > 0 ? st.lastSet.reps : 0}</div></div>
+                </div>
+              );
+            })()}
+
+            {recExercise && (
+              <div className="pills" style={{ marginBottom: 12 }}>
+                <button className={"pill" + (progressionMode === "weight" ? " active" : "")} onClick={() => setProgressionModeAndSave("weight")}>Increase Weight</button>
+                <button className={"pill" + (progressionMode === "reps" ? " active" : "")} onClick={() => setProgressionModeAndSave("reps")}>Increase Reps</button>
+              </div>
+            )}
+
+            {!recExercise ? null : recommendation?.noData ? (
+              <div className="rec-card">
+                <div className="label-sm">What's your strongest set?</div>
+                <div style={{ fontSize: "var(--fs-label)", color: "var(--text-primary)", lineHeight: 1.5, marginBottom: 12 }}>
+                  No sets logged for {recExercise} yet. Enter the most weight you've lifted for it and how many reps, and that's enough to build a first recommendation.
+                </div>
+                <div className="row3" style={{ marginBottom: 0 }}>
+                  <input type="number" inputMode="decimal" placeholder={unit} value={manualWeight} onChange={(e) => setManualWeight(e.target.value)} />
+                  <input type="number" inputMode="numeric" placeholder="reps" value={manualReps} onChange={(e) => setManualReps(e.target.value)} />
+                </div>
+              </div>
+            ) : recommendation && (
+              <div className="rec-card">
+                <div className="rec-top tap" role="button" tabIndex={0} aria-label={`Open ${recExercise} progress`} onClick={() => openExercise(recExercise, todayISO(), true)} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") openExercise(recExercise, todayISO(), true); }}>
+                  <div>
+                    <div className="label-sm" style={{ marginBottom: 0 }}>Recommended today ›</div>
+                    <div className="rec-main">{bwNames.has(recExercise) ? <>{bwLabel(Wrec(recommendation.nextTopWeight), (v) => v, unit)}<span className="muted"> × </span></> : <>{Wrec(recommendation.nextTopWeight)}<span className="muted"> {unit} × </span></>}{repsText(recommendation.repLow, recommendation.repHigh)}</div>
+                    {barbellNow(recExercise) && (() => { const pl = platesPerSide(recommendation.nextTopWeight); if (!pl) return null; return <div className="plate-line">{pl.just ? "Just the bar (45 lb)" : <>Per side: <b>{pl.list.join(" + ")}</b> lb</>}{!pl.exact && <span className="muted"> (closest: {pl.total} lb)</span>}</div>; })()}
+                  </div>
+                  <div className="rec-last">{recommendation.fromManual ? "Your entry" : `Last ${fmtDate(recommendation.lastSessionDate)}`}<br />{bwNames.has(recExercise) ? bwLabel(W(recommendation.lastTop.weight), (v) => v, "").trim() : W(recommendation.lastTop.weight)} × {recommendation.lastTop.reps}</div>
+                </div>
+                <div className="rec-note">{cvText(recommendation.note)}</div>
+                <div className="today-list" style={{ marginTop: 8 }}>
+                  {recommendation.rows.map((r) => (
+                    <div key={r.set} className={"today-item" + (r.set === 1 ? " top-set" : " sub-set")} style={{ padding: "8px 12px" }}>
+                      <span style={{ fontWeight: 600 }}>{r.set === 1 ? "Top set" : `Set ${r.set}`}</span>
+                      <span className="num">{bwNames.has(recExercise) ? bwLabel(Wrec(r.weight), (v) => v, unit) : <>{Wrec(r.weight)}<span className="muted">{unit}</span></>}<span className="muted">× {repsText(recommendation.repLow, recommendation.repHigh)}</span></span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {dupPrompt && dupPrompt.kind === "brand" && (
+              <div className="dup-prompt">
+                <div style={{ fontSize: "var(--fs-label)", lineHeight: 1.4, marginBottom: 8 }}>
+                  You already have <b>{dupPrompt.existing}</b>{exMeta[dupPrompt.existing] && exMeta[dupPrompt.existing].brand ? <> on {exMeta[dupPrompt.existing].brand}</> : null}. Same lift on {dupPrompt.brand}?
+                </div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button className="btn-iron" style={{ flex: 1, padding: "8px 4px", fontSize: "var(--fs-label)" }} onClick={() => {
+                    addExerciseToList(dupPrompt.typed, dupPrompt.days || [activeWorkoutId], true, dupPrompt.brand); resetAddForm(); setDupPrompt(null);
+                  }}>Same lift, combine</button>
+                  <button className="pill" style={{ flex: 1, padding: "8px 4px", fontSize: "var(--fs-label)" }} onClick={() => {
+                    addExerciseToList(`${dupPrompt.typed} (${dupPrompt.brand})`, dupPrompt.days || [activeWorkoutId], true, ""); resetAddForm(); setDupPrompt(null);
+                  }}>Track separately</button>
+                </div>
+              </div>
+            )}
+            {dupPrompt && dupPrompt.kind !== "brand" && (
+              <div className="dup-prompt">
+                <div style={{ fontSize: "var(--fs-label)", lineHeight: 1.4, marginBottom: 8 }}>
+                  You already have <b>{dupPrompt.existing}</b>. Is "{dupPrompt.typed}" the same lift?
+                </div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button className="btn-iron" style={{ flex: 1, padding: "8px 4px", fontSize: "var(--fs-label)" }} onClick={() => {
+                    if (dupPrompt.kind === "log") { setRecExercise(dupPrompt.existing); submitSet(dupPrompt.existing, true); }
+                    else { selectExercise(dupPrompt.existing); resetAddForm(); }
+                  }}>Use {dupPrompt.existing}</button>
+                  <button className="pill" style={{ flex: 1, padding: "8px 4px", fontSize: "var(--fs-label)" }} onClick={() => {
+                    if (dupPrompt.kind === "log") submitSet(dupPrompt.typed, true);
+                    else { addExerciseToList(dupPrompt.typed, dupPrompt.days || [activeWorkoutId], true); resetAddForm(); setDupPrompt(null); }
+                  }}>Keep as new</button>
+                </div>
+              </div>
+            )}
+
+            <div className="stepper-list" style={{ marginTop: 12 }}>
+              {[["weight", canGoNegative(form.exercise.trim()) ? `Weight (${unit}), minus = assist` : `Weight (${unit})`, "0", "decimal", unit === "kg" ? 2.5 : 5], ["reps", "Reps", "0", "numeric", 1]].map(([key, label, ph, mode, step]) => (
                 <div key={key} className="stepper-field">
-                  <input type="number" inputMode={mode} placeholder={ph} value={form[key]} onChange={(e) => setForm({ ...form, [key]: e.target.value })} />
-                  <div className="stepper-btns">
-                    <button type="button" aria-label={`Increase ${ph}`} onClick={() => bumpForm(key, step)}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="6 15 12 9 18 15" /></svg></button>
-                    <button type="button" aria-label={`Decrease ${ph}`} onClick={() => bumpForm(key, -step)}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="6 9 12 15 18 9" /></svg></button>
+                  <div className="label-sm stepper-label">{label}</div>
+                  <div className="stepper-row">
+                    <button type="button" className="step-btn" aria-label={`Decrease ${label}`} onClick={() => bumpForm(key, -step)}><DotIcon rows={DOT_MINUS} color="currentColor" size={18} /></button>
+                    <input type="number" inputMode={mode} placeholder={ph} aria-label={label} value={form[key]} onFocus={(e) => { const t = e.target; setTimeout(() => t.select(), 0); }} onMouseUp={(e) => e.preventDefault()} onChange={(e) => setForm({ ...form, [key]: e.target.value })} />
+                    <button type="button" className="step-btn" aria-label={`Increase ${label}`} onClick={() => bumpForm(key, step)}><DotIcon rows={DOT_PLUS} color="currentColor" size={18} /></button>
                   </div>
                 </div>
               ))}
             </div>
-            <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, fontSize: 13, color: "var(--mute)", cursor: "pointer" }}>
-              <input type="checkbox" checked={form.isWarmup} onChange={(e) => setForm({ ...form, isWarmup: e.target.checked })} style={{ width: 16, height: 16, accentColor: "var(--iron)" }} />
-              Warm-up set (won't count toward recommendations or your top set)
-            </label>
-            <button className="btn-iron save-btn" onClick={submitSet}>Save Set</button>
+            <div className="warm-row">
+              {oneSidedNow(form.exercise.trim()) && (
+                <div className="side-row" role="group" aria-label="Which side">
+                  {[["L", "Left"], ["R", "Right"]].map(([k, lab]) => (
+                    <button key={k} type="button" className={"chip" + (logSide === k ? " active" : "")} aria-pressed={logSide === k} onClick={() => { setLogSide(k); const d = prefillFor(form.exercise.trim(), k); if (d && d.weight) setForm((f) => ({ ...f, weight: d.weight, reps: d.reps })); }}>{lab}</button>
+                  ))}
+                </div>
+              )}
+              <button type="button" className={"chip" + (form.isWarmup ? " active" : "")} aria-pressed={!!form.isWarmup} onClick={() => setForm({ ...form, isWarmup: !form.isWarmup })}>Warm-up</button>
+            </div>
+            <InfoFoot title="warm-up sets" info="Warm-up sets don't count toward recommendations or your top set" right={<button type="button" className="cam-btn" aria-label="Import a photo of your handwritten notes" onClick={() => notesInputRef.current && notesInputRef.current.click()}><DotNotebook size={3} /></button>} />
+            <input ref={notesInputRef} type="file" accept="image/*" hidden onChange={(e) => scanNotes(e.target.files && e.target.files[0])} />
           </div>
 
           {todaysEntries.length > 0 && (
@@ -1705,337 +3444,498 @@ export default function Home() {
           )}
           {showTodaysLog && todaysEntries.length > 0 && (
             <div style={{ marginBottom: 12 }}>
-              <div className="today-list">
-                {todaysEntries.map((e) => (
-                  editingId === e.id ? (
-                    <div key={e.id} className="today-item" style={{ flexWrap: "wrap", gap: 6 }}>
-                      <span style={{ fontWeight: 600 }}>{e.exercise}</span>
-                      <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                        <input type="number" inputMode="decimal" value={editForm.weight} onChange={(ev) => setEditForm({ ...editForm, weight: ev.target.value })} style={{ width: 52, padding: "4px 6px", fontSize: 13 }} />
-                        <span className="muted" style={{ fontSize: 11 }}>lbs ×</span>
-                        <input type="number" inputMode="numeric" value={editForm.reps} onChange={(ev) => setEditForm({ ...editForm, reps: ev.target.value })} style={{ width: 40, padding: "4px 6px", fontSize: 13 }} />
-                        <span className="muted" style={{ fontSize: 11 }}>×</span>
-                        <input type="number" inputMode="numeric" value={editForm.sets} onChange={(ev) => setEditForm({ ...editForm, sets: ev.target.value })} style={{ width: 40, padding: "4px 6px", fontSize: 13 }} />
-                        <button className="del-btn" onClick={() => saveEdit(e.id)} style={{ color: "#22c55e", fontWeight: 700 }}>✓</button>
-                        <button className="del-btn" onClick={cancelEdit}>✕</button>
-                      </span>
-                    </div>
-                  ) : (
-                    <div key={e.id} className="today-item" style={{ opacity: e.isWarmup ? 0.6 : 1 }}>
-                      <span style={{ fontWeight: 600 }}>{e.exercise}{e.isWarmup && <span className="muted" style={{ fontSize: 10, fontWeight: 400 }}> (warm-up)</span>}</span>
-                      <span className="num">{e.weight}<span className="muted">lbs</span>{e.reps > 0 && <span className="muted">× {e.reps}{e.sets > 1 ? ` × ${e.sets}` : ""}</span>}<button className="del-btn" onClick={() => startEdit(e)} title="Edit">✎</button><button className="del-btn" onClick={() => toggleWarmup(e.id)} title={e.isWarmup ? "Mark as working set" : "Mark as warm-up"} style={{ fontSize: 10, fontWeight: 700, color: e.isWarmup ? "var(--iron)" : "var(--mute)" }}>W</button><button className="del-btn" onClick={() => deleteEntry(e.id)}>✕</button></span>
-                    </div>
-                  )
-                ))}
-              </div>
+              <div className="today-list">{todaysEntries.map((e) => renderEditableRow(e, false))}</div>
             </div>
           )}
 
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 24 }}>
-            {!addingExercise ? (
-              <button className="add-ex-link" style={{ marginBottom: 0 }} onClick={() => setAddingExercise(true)}>+ Add new exercise</button>
-            ) : (
-              <div className="add-ex-row" style={{ marginBottom: 0, flex: 1, marginRight: 12 }}>
-                <input value={newExerciseName} onChange={(e) => setNewExerciseName(e.target.value)} placeholder="Exercise name" />
-                <button className="btn-iron" onClick={() => { addExerciseToList(newExerciseName); setNewExerciseName(""); setAddingExercise(false); }}>Add</button>
-              </div>
-            )}
-            <button className="add-ex-link" style={{ marginBottom: 0, flexShrink: 0 }} onClick={clearForm}>Clear All</button>
-          </div>
-
-          <div style={{ marginTop: 28, paddingTop: 20, borderTop: "1px solid var(--border)" }}>
-            <div className="label-sm" style={{ marginBottom: 10 }}>Recommended for today</div>
-            <div className="ex-input-wrap">
-              <input
-                className="ex-input"
-                placeholder="Search an exercise…"
-                value={recExercise ? recExercise : recSearch}
-                onChange={(e) => { setRecSearch(e.target.value); setRecExercise(null); setManualWeight(""); setManualReps(""); setRecSuggestOpen(true); }}
-                onFocus={(e) => { setRecSuggestOpen(true); setTimeout(() => e.target.scrollIntoView({ behavior: "smooth", block: "center" }), 300); }}
-                onBlur={() => setTimeout(() => setRecSuggestOpen(false), 150)}
-              />
-              {recSuggestOpen && recSuggestions.length > 0 && (
-                <div className="suggestions">
-                  {recSuggestions.map((name) => (
-                    <button key={name} onClick={() => { setRecExercise(name); setRecSearch(""); setManualWeight(""); setManualReps(""); setRecSuggestOpen(false); }}>{name}</button>
-                  ))}
-                </div>
+            <div style={{ display: "flex", gap: 16, alignItems: "center", flexWrap: "wrap" }}>
+              {!addingExercise ? (
+                <button className="add-ex-link" style={{ marginBottom: 0 }} data-tut="addex" onClick={() => setAddingExercise(true)}>+ Add new exercise</button>
+              ) : (
+                <button className="add-ex-link" style={{ marginBottom: 0 }} onClick={resetAddForm}>Cancel new exercise</button>
               )}
             </div>
-
-            <div className="pills" style={{ marginBottom: recExercise ? 12 : 16 }}>
-              <button className={"pill" + (progressionMode === "weight" ? " active" : "")} onClick={() => setProgressionModeAndSave("weight")}>Increase Weight</button>
-              <button className={"pill" + (progressionMode === "reps" ? " active" : "")} onClick={() => setProgressionModeAndSave("reps")}>Increase Reps</button>
-            </div>
-            <div className="axis-caption" style={{ marginTop: -6, marginBottom: 14 }}>
-              {progressionMode === "weight"
-                ? "Same weight until you hit 12 reps, then weight goes up and reps reset to 8."
-                : "Weight stays put — this only tracks how many reps you can add over time. Switch back to Increase Weight whenever you're ready."}
-            </div>
-
-            {recExercise && (
-              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16 }}>
-                <span style={{ fontSize: 13, fontWeight: 700, color: "var(--mute)" }}>Sets today</span>
-                <button className="pill" onClick={() => setRecSets((n) => Math.max(1, n - 1))}>−</button>
-                <span style={{ fontFamily: "monospace", fontWeight: 700, fontSize: 15, minWidth: 18, textAlign: "center" }}>{recSets}</span>
-                <button className="pill" onClick={() => setRecSets((n) => Math.min(8, n + 1))}>+</button>
-              </div>
-            )}
-
-            {!recExercise ? (
-              <div className="empty">Pick an exercise to see a suggested weight for today.</div>
-            ) : recommendation?.noData ? (
-              <div className="card">
-                <div className="label-sm">What's your strongest set?</div>
-                <div style={{ fontSize: 13, color: "var(--chalk)", lineHeight: 1.5, marginBottom: 14 }}>
-                  No sets logged for {recExercise} yet. Enter the most weight you've lifted for it and how many reps — that's enough to build a first recommendation.
-                </div>
-                <div className="row3" style={{ marginBottom: 0 }}>
-                  <input type="number" inputMode="decimal" placeholder="lbs" value={manualWeight} onChange={(e) => setManualWeight(e.target.value)} />
-                  <input type="number" inputMode="numeric" placeholder="reps" value={manualReps} onChange={(e) => setManualReps(e.target.value)} />
-                </div>
-              </div>
-            ) : recommendation && (
-              <div className="card">
-                <div className="label-sm">
-                  {recommendation.fromManual ? "Strongest set" : `Last logged ${fmtDate(recommendation.lastSessionDate)}`} · {recommendation.lastTop.weight} lbs × {recommendation.lastTop.reps}
-                </div>
-                <div style={{ fontSize: 13, color: "var(--chalk)", marginBottom: 14, lineHeight: 1.5 }}>{recommendation.note}</div>
-                <div className="today-list">
-                  {recommendation.rows.map((r) => (
-                    <div key={r.set} className="today-item">
-                      <span style={{ fontWeight: 600 }}>Set {r.set}{r.set === 1 ? " (top)" : ""}</span>
-                      <span className="num">{r.weight}<span className="muted">lbs</span><span className="muted">× {recommendation.repLow}–{recommendation.repHigh}</span></span>
-                    </div>
-                  ))}
-                </div>
-                <div className="chart-note" style={{ marginTop: 14 }}>
-                  {recommendation.basedOnActualSets
-                    ? "Backoff weights are modeled on your own logged set-by-set drop-off last session."
-                    : "Backoff weights use a standard pyramid (90% / 85% / 80%…) — a solid estimate from a single logged set."}
-                  {" "}Double progression: same weight until you hit {recommendation.repHigh} reps on the top set, then the weight goes up and reps reset to {recommendation.repLow}. This is a starting point — listen to how the weight actually feels that day.
-                </div>
-              </div>
-            )}
           </div>
-        </>
-        </div>
-
-        <div ref={(el) => (sectionRefs.current.exercises = el)} style={{ marginTop: 40, paddingTop: 24, borderTop: "1px solid var(--border)" }}>
-        <>
-          <div className="label-sm" style={{ marginBottom: 14 }}>Exercises</div>
-          <div style={{ display: "flex", gap: 6, alignItems: "stretch" }}>
-          <div style={{ flex: 1, minWidth: 0 }}>
-          {(() => {
-            const sorted = [...activeList].sort((a, b) => a.localeCompare(b));
-            const seenLetters = new Set();
-            return sorted.map((ex) => {
-              const letter = ex[0]?.toUpperCase() || "#";
-              const isFirstOfLetter = !seenLetters.has(letter);
-              seenLetters.add(letter);
-              const history = entriesByExercise[ex] || [];
-              const strengthHistory = history.filter((e) => !e.isWarmup);
-              const best = strengthHistory.reduce((m, e) => Math.max(m, e.weight), 0);
-              const isOpen = expandedExercise === ex;
-              const plateaued = plateauFlag(strengthHistory);
-              return (
-                <div key={ex} className="ex-card" ref={isFirstOfLetter ? (el) => { azRefs.current[letter] = el; } : null}>
-                  <div className="ex-head" style={{ cursor: "pointer" }} onClick={() => setExpandedExercise(isOpen ? null : ex)}>
-                    <div className="badge" style={{ background: best ? "var(--badge-on)" : "var(--surface-3)", border: `2px solid ${best ? "var(--iron)" : "var(--border)"}`, color: best ? "var(--iron)" : "var(--mute)" }}>{best || "—"}</div>
-                    <div style={{ flex: 1 }}>
-                      <div className="ex-name">{ex}</div>
-                      <div className="ex-meta">{history.length ? `${history.length} logged · last ${fmtDate(history[0].date)}` : "no sets logged yet"}</div>
-                      {plateaued && <div style={{ fontSize: 11, fontWeight: 700, color: "var(--iron)", marginTop: 3 }}>⚠ Same top weight 3 sessions running — consider adding weight</div>}
-                    </div>
-                    <button
-                      onClick={(e) => { e.stopPropagation(); removeExerciseFromList(ex, activeWorkoutId); }}
-                      style={{ background: "none", border: "none", color: "var(--mute)", padding: 4, flexShrink: 0 }}
-                      aria-label={`Remove ${ex}`}
-                    >
-                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2m3 0v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6h14z" /></svg>
-                    </button>
-                    <span style={{ color: "var(--mute)", transform: isOpen ? "rotate(180deg)" : "none", display: "inline-block" }}>▾</span>
-                  </div>
-                  {isOpen && history.length > 0 && (
-                    <div className="ex-hist">
-                      {history.slice(0, 8).map((e) => (
-                        editingId === e.id ? (
-                          <div key={e.id} className="hist-item" style={{ flexWrap: "wrap", gap: 4 }}>
-                            <span className="muted" style={{ fontFamily: "monospace", fontSize: 11 }}>{fmtDate(e.date)}</span>
-                            <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                              <input type="number" inputMode="decimal" value={editForm.weight} onChange={(ev) => setEditForm({ ...editForm, weight: ev.target.value })} style={{ width: 48, padding: "3px 5px", fontSize: 12 }} />
-                              <span className="muted" style={{ fontSize: 10 }}>×</span>
-                              <input type="number" inputMode="numeric" value={editForm.reps} onChange={(ev) => setEditForm({ ...editForm, reps: ev.target.value })} style={{ width: 36, padding: "3px 5px", fontSize: 12 }} />
-                              <span className="muted" style={{ fontSize: 10 }}>×</span>
-                              <input type="number" inputMode="numeric" value={editForm.sets} onChange={(ev) => setEditForm({ ...editForm, sets: ev.target.value })} style={{ width: 36, padding: "3px 5px", fontSize: 12 }} />
-                              <button className="del-btn" onClick={() => saveEdit(e.id)} style={{ color: "#22c55e", fontWeight: 700 }}>✓</button>
-                              <button className="del-btn" onClick={cancelEdit}>✕</button>
-                            </span>
-                          </div>
-                        ) : (
-                          <div key={e.id} className="hist-item">
-                            <span className="muted" style={{ fontFamily: "monospace", fontSize: 11 }}>{fmtDate(e.date)}</span>
-                            <span className="num" style={{ opacity: e.isWarmup ? 0.55 : 1 }}>
-                              {e.weight} <span className="muted">lbs ×</span> {e.reps}{e.sets > 1 && <span className="muted"> × {e.sets} sets</span>}
-                              {e.isWarmup && <span className="muted" style={{ fontSize: 10 }}> (warm-up)</span>}
-                            </span>
-                            <button className="del-btn" onClick={() => startEdit(e)} title="Edit">✎</button>
-                            <button className="del-btn" onClick={() => toggleWarmup(e.id)} title={e.isWarmup ? "Mark as working set" : "Mark as warm-up"} style={{ fontSize: 10, fontWeight: 700, color: e.isWarmup ? "var(--iron)" : "var(--mute)" }}>W</button>
-                            <button className="del-btn" onClick={() => deleteEntry(e.id)}>✕</button>
-                          </div>
-                        )
-                      ))}
-                    </div>
-                  )}
-                </div>
-              );
-            });
-          })()}
-          </div>
-          {activeList.length > 6 && (
-            <div className="az-col">
-              <div
-                ref={azStripRef}
-                className="az-strip"
-                onPointerDown={azStart}
-                onPointerMove={azMove}
-                onPointerUp={azEnd}
-                onPointerLeave={azEnd}
-              >
-                {"ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("").map((l) => <span key={l}>{l}</span>)}
+          {addingExercise && (
+            <div className="card add-card">
+              <div className="label-sm">New exercise</div>
+              <button type="button" className="chip scan-btn" disabled={scanBusy} onClick={() => scanInputRef.current && scanInputRef.current.click()}>{scanBusy ? "Reading…" : "Scan machine with camera"}</button>
+              <input ref={scanInputRef} type="file" accept="image/*" capture="environment" hidden onChange={(e) => scanMachine(e.target.files && e.target.files[0])} />
+              {scanMsg && <div className="helper" style={{ marginBottom: 8 }}>{scanMsg}</div>}
+              <div className="helper" style={{ marginBottom: 8 }}>Tip: photograph the placard with the machine name and brand.</div>
+              <input value={newExerciseName} onChange={(e) => setNewExerciseName(e.target.value)} placeholder="Exercise name" style={{ marginBottom: 8 }} />
+              <input value={newExerciseTicker} onChange={(e) => setNewExerciseTicker(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 5))} placeholder={`Ticker (optional, ${defaultTicker(newExerciseName) || "e.g. BENCH"})`} maxLength={5} autoCapitalize="characters" style={{ marginBottom: 8, fontFamily: "var(--font-num)", letterSpacing: ".06em" }} />
+              <input value={newExerciseBrand} onChange={(e) => setNewExerciseBrand(e.target.value)} list="machine-brands" placeholder="Machine / brand (optional)" style={{ marginBottom: 8 }} />
+              <div className="side-row" style={{ marginBottom: 12 }} role="group" aria-label="Both sides or one at a time">
+                <button type="button" className={"chip" + (!newExerciseOneSided ? " active" : "")} aria-pressed={!newExerciseOneSided} onClick={() => setNewExerciseOneSided(false)}>Both sides</button>
+                <button type="button" className={"chip" + (newExerciseOneSided ? " active" : "")} aria-pressed={newExerciseOneSided} onClick={() => setNewExerciseOneSided(true)}>One side at a time</button>
               </div>
+              <datalist id="machine-brands">{MACHINE_BRANDS.map((b) => <option key={b} value={b} />)}</datalist>
+              <div className="label-sm" style={{ marginBottom: 4 }}>Which day(s)? Tick any that apply</div>
+              <div className="day-checks">
+                {workouts.map((w) => (
+                  <label key={w.id} className={"day-check" + (newExerciseDays.includes(w.id) ? " on" : "")}>
+                    <input type="checkbox" checked={newExerciseDays.includes(w.id)} onChange={() => setNewExerciseDays((d) => (d.includes(w.id) ? d.filter((x) => x !== w.id) : [...d, w.id]))} />
+                    {w.name}
+                  </label>
+                ))}
+              </div>
+              <div className="newday-row">
+                <input value={newDayName} onChange={(e) => setNewDayName(e.target.value)} placeholder="New day (e.g. Shoulders)" maxLength={20} />
+                <button type="button" className="chip" disabled={!newDayName.trim()} onClick={() => { const id = addDay(newDayName); if (id) { setNewExerciseDays((d) => [...d, id]); setNewDayName(""); } }}>Add day</button>
+              </div>
+              <button className="btn-iron save-btn" disabled={!newExerciseName.trim() || !newExerciseDays.length} style={{ opacity: newExerciseName.trim() && newExerciseDays.length ? 1 : 0.5, marginTop: 12 }}
+                onClick={() => { if (addExerciseToList(newExerciseName, newExerciseDays, false, newExerciseBrand)) resetAddForm(); }}>
+                Add exercise
+              </button>
             </div>
           )}
-          </div>
-        </>
         </div>
 
-        <div ref={(el) => (sectionRefs.current.charts = el)} style={{ marginTop: 40, paddingTop: 24, borderTop: "1px solid var(--border)" }}>
-        <>
-          <div className="label-sm" style={{ marginBottom: 14 }}>Progress</div>
+        {/* ---------------- PROGRESS ---------------- */}
+        <div ref={(el) => (sectionRefs.current.charts = el)} className="section-block" data-tut="charts">
+          <div className="label-sm" style={{ marginBottom: 12 }}>Progress</div>
           {(() => {
-            const withData = allExerciseNames.filter((ex) => (entriesByExercise[ex] || []).length > 0).sort((a, b) => a.localeCompare(b));
-            const groups = {};
-            withData.forEach((ex) => { const L = (ex[0] || "#").toUpperCase(); (groups[L] = groups[L] || []).push(ex); });
+            const withData = allExerciseNames.filter((ex) => (entriesByExercise[ex] || []).length > 0);
+            const lastDate = (ex) => (entriesByExercise[ex][0] || {}).date || "";
+            const q = progQuery.trim();
+            const matches = q ? searchExercises(q, withData, 8) : withData.slice().sort((a, b) => (lastDate(a) < lastDate(b) ? 1 : -1)).slice(0, 8);
+            const pickProg = (ex) => { setProgCleared(false); setChartFocusExercise(ex); setProgOpen(false); setProgQuery(""); setMergeOpen(false); setHistoryAll(false); setEditingId(null); };
             return (
-              <select className="scope" value={chartFocusExercise || ""} onChange={(e) => setChartFocusExercise(e.target.value || null)}>
-                {!chartFocusExercise && <option value="">Select an exercise…</option>}
-                {Object.keys(groups).sort().map((L) => (
-                  <optgroup key={L} label={L}>
-                    {groups[L].map((ex) => <option key={ex} value={ex}>{ex}</option>)}
-                  </optgroup>
-                ))}
-              </select>
+              <div className="ex-input-wrap" style={{ marginBottom: 12 }}>
+                <input
+                  className="ex-input"
+                  placeholder="Search an exercise"
+                  value={progOpen ? progQuery : (chartFocusExercise || "")}
+                  onChange={(e) => setProgQuery(e.target.value)}
+                  onFocus={(e) => { setProgOpen(true); setProgQuery(""); e.target.select && e.target.select(); }}
+                  onBlur={() => setTimeout(() => setProgOpen(false), 150)}
+                />
+                {(chartFocusExercise || progQuery) && <ClearX label="Clear exercise" onClick={() => { setProgCleared(true); setChartFocusExercise(null); setProgQuery(""); setMergeOpen(false); setHistoryAll(false); setEditingId(null); }} />}
+                {progOpen && matches.length > 0 && (
+                  <div className="suggestions">
+                    {matches.map((s2) => <button key={s2} onMouseDown={(ev) => ev.preventDefault()} onClick={() => pickProg(s2)}>{s2}</button>)}
+                  </div>
+                )}
+              </div>
             );
           })()}
-          <div className="pills">
-            {RANGE_PRESETS.map((r) => <button key={r.key} className={"pill" + (r.key === chartRange ? " active" : "")} onClick={() => setChartRange(r.key)}>{r.label}</button>)}
+          <div className="pills range-tabs" style={{ marginBottom: 0 }}>
+            {RANGE_PRESETS.map((r) => <button key={r.key} className={"pill" + (r.key === chartRange ? " active" : "")} onClick={() => setChartRange(r.key)}><span className="tab-l">{r.label}</span></button>)}
           </div>
-          <div className="pills">
-            <button className={"pill" + (chartMetric === "weight" ? " active" : "")} onClick={() => setChartMetric("weight")}>Top Weight</button>
-            <button className={"pill" + (chartMetric === "e1rm" ? " active" : "")} onClick={() => setChartMetric("e1rm")}>Est. 1RM</button>
+          <div className="pills pills-sub">
+            <button className={"pill pill-sm" + (chartMetric === "weight" ? " active" : "")} onClick={() => setChartMetric("weight")}><span className="tab-l">Top Weight</span></button>
+            <button className={"pill pill-sm" + (chartMetric === "e1rm" ? " active" : "")} onClick={() => setChartMetric("e1rm")}><span className="tab-l">Est. max</span></button>
           </div>
           {chartResult.rows.length === 0 ? (
-            <div className="empty">No sets logged in this range yet.</div>
+            <div className="empty">{chartFocusExercise ? "No sets logged in this range yet." : "Pick an exercise to see its progress."}</div>
           ) : (
             <div className="card">
-              <SvgChart rows={chartResult.rows} series={chartResult.series} mode={chartFocusExercise || chartScope !== "ALL" ? "exercise" : "workout"} metric={chartMetric} />
-              <div className="legend">
-                {chartResult.series.map((s, i) => <div key={s} className="legend-item"><span className="legend-dot" style={{ background: LINE_COLORS[i % LINE_COLORS.length] }} />{s}</div>)}
+              <div
+                onPointerDown={(e) => { chartTap.current = { t: Date.now(), x: e.clientX, y: e.clientY }; }}
+                onPointerUp={(e) => {
+                  const st = chartTap.current; chartTap.current = null;
+                  if (st && chartFocusExercise && Date.now() - st.t < 220 && Math.hypot(e.clientX - st.x, e.clientY - st.y) < 8) {
+                    openExercise(chartFocusExercise, ((entriesByExercise[chartFocusExercise] || [])[0] || {}).date, true);
+                  }
+                }}
+              >
+                <SvgChart rows={chartResult.rows} series={chartResult.series} mode="exercise" metric={chartMetric} unit={bodyweightInfo(entriesByExercise[chartFocusExercise] || [], settings.bodyWeight).repsMode ? "reps" : unit} />
               </div>
-              <div className="chart-note">
-                {chartFocusExercise ? "This exercise's heaviest set logged each day. " : chartScope === "ALL" ? "Each line is a workout day's average top set across its exercises. " : "Each line is an exercise's heaviest set logged that day. "}
-                Tap a point for the exact reps, sets, and weight. {chartMetric === "e1rm" && "Est. 1RM uses the Epley formula from your top set's weight and reps."}
-              </div>
+              {chartMetric === "e1rm" && <div className="chart-note">Est. 1RM uses the Epley formula, counting up to 10 reps.</div>}
             </div>
           )}
-        </>
-        </div>
 
-        <div ref={(el) => (sectionRefs.current.goal = el)} style={{ marginTop: 40, paddingTop: 24, borderTop: "1px solid var(--border)" }}>
-        <>
-          <div className="label-sm" style={{ marginBottom: 14 }}>Goal Program</div>
-          <select className="scope" value={goalExercise || ""} onChange={(e) => { setGoalExercise(e.target.value || null); setGoalMaxTouched(false); }}>
-            <option value="">Select an exercise…</option>
-            {allExerciseNames.map((name) => <option key={name} value={name}>{name}</option>)}
-          </select>
-
-          {goalExercise && (
-            <>
-              <div className="card" style={{ marginBottom: 16 }}>
-                <div className="label-sm">Current max (est.)</div>
-                <input type="number" inputMode="decimal" value={goalCurrentMax} onChange={(e) => { setGoalCurrentMax(e.target.value); setGoalMaxTouched(true); }} style={{ width: "100%", padding: "10px 12px", fontSize: 16, fontWeight: 700, fontFamily: "monospace", marginBottom: 12 }} />
-
-                <div className="label-sm">Goal weight</div>
-                <input type="number" inputMode="decimal" placeholder="e.g. 315" value={goalWeight} onChange={(e) => setGoalWeight(e.target.value)} style={{ width: "100%", padding: "10px 12px", fontSize: 16, fontWeight: 700, fontFamily: "monospace", marginBottom: 12 }} />
-
-                <div style={{ display: "flex", gap: 20 }}>
-                  <div style={{ flex: 1 }}>
-                    <div className="label-sm">Weeks</div>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                      <button className="pill" onClick={() => setGoalWeeks((n) => Math.max(2, n - 1))}>−</button>
-                      <span style={{ fontFamily: "monospace", fontWeight: 700, minWidth: 16, textAlign: "center" }}>{goalWeeks}</span>
-                      <button className="pill" onClick={() => setGoalWeeks((n) => Math.min(12, n + 1))}>+</button>
-                    </div>
-                  </div>
-                  <div style={{ flex: 1 }}>
-                    <div className="label-sm">Days/week</div>
-                    <div className="pills" style={{ marginBottom: 0 }}>
-                      <button className={"pill" + (goalDaysPerWeek === 1 ? " active" : "")} onClick={() => setGoalDaysPerWeek(1)}>1</button>
-                      <button className={"pill" + (goalDaysPerWeek === 2 ? " active" : "")} onClick={() => setGoalDaysPerWeek(2)}>2</button>
-                    </div>
-                  </div>
+          {chartFocusExercise && (
+            <div className="card flat">
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+                <div className="label-sm" style={{ marginBottom: 0 }}>History · {focusHistory.length} logged</div>
+                <div style={{ display: "flex", gap: 12 }}>
+                  <button className="add-ex-link" style={{ marginBottom: 0, fontSize: "var(--fs-label)" }} onClick={() => setMergeOpen((v) => !v)}>Merge into…</button>
                 </div>
               </div>
-
-              {goalProgram?.error ? (
-                <div className="empty">{goalProgram.error}</div>
-              ) : goalProgram && (
-                <div className="card">
-                  {goalProgram.rows.map((wk) => (
-                    <div key={wk.week} style={{ marginBottom: 14, paddingBottom: 14, borderBottom: wk.week < goalProgram.rows.length ? "1px solid var(--border)" : "none" }}>
-                      <div className="label-sm" style={{ marginBottom: 6 }}>Week {wk.week}</div>
-                      <div className="today-item" style={{ marginBottom: wk.light ? 6 : 0 }}>
-                        <span style={{ fontWeight: 600 }}>{wk.light ? "Heavy" : "Working"}</span>
-                        <span className="num">{wk.heavy.weight}<span className="muted">lbs ×</span> {wk.heavy.reps}<span className="muted">× {wk.heavy.sets} sets</span></span>
-                      </div>
-                      {wk.light && (
-                        <div className="today-item">
-                          <span style={{ fontWeight: 600 }}>Light</span>
-                          <span className="num">{wk.light.weight}<span className="muted">lbs ×</span> {wk.light.reps}<span className="muted">× {wk.light.sets} sets</span></span>
-                        </div>
-                      )}
-                    </div>
-                  ))}
-                  <div className="chart-note">
-                    Linear step from your current estimated max to {goalWeight} lbs by week {goalWeeks}, with reps tapering down as the weight climbs — same shape as a standard peaking block. Re-check this against how you're actually recovering; it's a starting plan, not a guarantee.
-                  </div>
+              {mergeUndo && (
+                <div className="merge-note">
+                  Merged {mergeUndo.from} into {mergeUndo.to}. <button className="add-ex-link" style={{ marginBottom: 0, fontSize: "var(--fs-label)", color: "var(--text-primary)" }} onClick={undoMerge}>Undo</button>
                 </div>
               )}
-            </>
+              {mergeOpen && (
+                <div className="merge-panel">
+                  <div style={{ fontSize: "var(--fs-label)", color: "var(--text-secondary)", lineHeight: 1.4, marginBottom: 8 }}>
+                    Moves every set logged under {chartFocusExercise} into the exercise you pick, then removes {chartFocusExercise}. Only merge true duplicates; different machines are different lifts.
+                  </div>
+                  <select className="scope" style={{ marginBottom: 8 }} value={mergeTarget} onChange={(e) => setMergeTarget(e.target.value)}>
+                    <option value="">Merge into…</option>
+                    {mergeCandidates.map((n) => <option key={n} value={n}>{n}</option>)}
+                  </select>
+                  <button className="btn-iron save-btn" disabled={!mergeTarget} style={{ opacity: mergeTarget ? 1 : 0.5 }} onClick={() => mergeExercise(chartFocusExercise, mergeTarget)}>
+                    Merge {chartFocusExercise} into {mergeTarget || "…"}
+                  </button>
+                </div>
+              )}
+              <div className="hist-list">{shownHistory.map((e) => renderEditableRow(e, true))}</div>
+              {focusHistory.length > 10 && (
+                <button className="add-ex-link" style={{ marginTop: 8, marginBottom: 0, fontSize: "var(--fs-label)" }} onClick={() => setHistoryAll((v) => !v)}>
+                  {historyAll ? "Show less" : `Show all ${focusHistory.length}`}
+                </button>
+              )}
+            </div>
           )}
-        </>
+
+          <div className="label-sm" style={{ margin: "24px 0 12px" }}>Training overview</div>
+          <div className="card">
+            <CardHead title="Strength growth by category" />
+            <RadarChart data={radarData} onTap={(id) => setOverview({ kind: "growth", range: "all", cat: id || null })} />
+            <button type="button" className="detail-link" onClick={() => setOverview({ kind: "growth", range: "all" })}>{allTimeRange ? `All time · ${fmtDate(allTimeRange.start)} – ${fmtDate(todayISO())}` : "All time"} · Details ›</button>
+            <InfoFoot title="Strength growth by category" info="Average % change in estimated 1RM per workout, all time. Tap the chart for a breakdown by exercise." />
+          </div>
+          <div className="card">
+            <CardHead title="Weekly training volume" />
+            <VolumeBarChart weeks={weeklyVolume} onTapBar={() => setOverview({ kind: "volume", range: "3m" })} dots={settings.dotNums !== false} />
+            <button type="button" className="detail-link" onClick={() => setOverview({ kind: "volume", range: "3m" })}>Last 10 weeks · Details ›</button>
+            {(() => { const cur = weeklyVolume.find((w) => w.isCurrent); if (!cur || !(cur.volume > 0)) return null; const t = compareLine(cur.volume, "week" + cur.volume); return t ? <div className="compare-line">This week: {fmtNum(W(cur.volume))} {unit} moved. {t}</div> : null; })()}
+            <InfoFoot title="Weekly training volume" info="Weight × sets × reps per week, Monday to Sunday, last 10 weeks. Tap the chart to split it by category and exercise." />
+          </div>
+          <div className="card">
+            <CardHead title="Training consistency" />
+            <ConsistencyHeatmap weeks={heatmapWeeks} onTap={(d) => setOverview({ kind: "days", range: "3m", date: d || null })} dots={settings.dotNums !== false} />
+            <button type="button" className="detail-link" onClick={() => setOverview({ kind: "days", range: "3m" })}>Last 10 weeks · Details ›</button>
+            <InfoFoot title="Training consistency" info="Each column is a week (Monday to Sunday). A lit square means you trained that day. Tap a day to see what you did." />
+            <div className="cons-stats">
+              <div className="st-cell"><div className="st-label">Week streak</div><div className="st-value">{consistency.streak}</div></div>
+              <div className="st-cell"><div className="st-label">Days this month</div><div className="st-value">{consistency.month}</div></div>
+            </div>
+          </div>
         </div>
 
         </>
       )}
 
-      <div className="bottom-nav">
-        <button className={"bottom-nav-item" + (activeSection === "exercises" ? " active" : "")} onClick={() => scrollToSection("exercises")}>
-          <IconDumbbell color={activeSection === "exercises" ? "var(--iron)" : "var(--mute)"} /><span>Exercises</span>
+      {fillSlip && (
+        <div className="fill-slip" role="status">
+          <span className="fill-tag">Filled</span>
+          <span className="fill-main">{fillSlip.name}</span>
+          <span className="fill-line">{fillSlip.line} · set {fillSlip.n} today</span>
+        </div>
+      )}
+      {exUndo && (
+        <div className="undo-toast" role="status">
+          <span>Deleted {exUndo.name} ({exUndo.count} {exUndo.count === 1 ? "set" : "sets"})</span>
+          <button type="button" onClick={undoDeleteExercise}>Undo</button>
+        </div>
+      )}
+      {undoDel && (
+        <div className="undo-toast" role="status">
+          <span>Set deleted</span>
+          <button type="button" onClick={undoDelete}>Undo</button>
+        </div>
+      )}
+
+      {overview && (
+        <Breakdown
+          initial={overview} onClose={() => setOverview(null)} onOpenExercise={(name, r) => openExercise(name, todayISO(), r === "ytd", r)} strengthEntries={strengthEntries} workouts={workouts} exercises={exercises} unit={unit} W={W}
+          h={{ fmtDate, fmtDateFull, fmtNum, shiftDate, weekStartISO, todayISO, rangeCutoffISO, RANGE_PRESETS, setWt }}
+        />
+      )}
+      {xpage && xData && (
+        <div className="xpage" role="dialog" aria-label={xpage.exercise}>
+          <div className="xp-top">
+            <button type="button" className="xp-back" onClick={(e) => closeExercise(e)} aria-label="Back"><svg width="12" height="20" viewBox="0 0 12 20" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M10 2L2 10l8 8" /></svg></button>
+            <div className="xp-title">{displayEx(xpage.exercise)}</div>
+          </div>
+          <div className="xp-scroll">
+            <div className="label-sm" style={{ textAlign: "center", marginBottom: 8 }}>{xRangeOf(xpage) === "all" ? `Through ${fmtDateFull(xpage.date)}` : ({ "1m": "Last month", "3m": "Last 3 months", "6m": "Last 6 months", ytd: "Year to date", "1y": "Last year" })[xRangeOf(xpage)]}</div>
+            <div className="portfolio-change">
+              {!xData.series ? <><span className="cap">Not enough data yet</span><span className="index-tag xp-tagline"><span /><button type="button" className="edit-ex-btn xp-edit" onClick={() => openEditEx(xpage.exercise)}>Edit</button></span></> : (() => {
+                const pct = xScrub ? xScrub.value : xData.series.pct;
+                const up = pct >= 0;
+                return (
+                  <>
+                    {settings.dotNums !== false
+                      ? <DotNum text={`${up ? "+" : "-"}${Math.abs(pct).toFixed(1)}%`} color={up ? "var(--gain)" : "var(--loss)"} />
+                      : <span className="index-num" style={{ color: up ? "var(--gain)" : "var(--loss)" }}>{up ? "+" : "−"}{Math.abs(pct).toFixed(1)}%</span>}
+                    <span className="index-meta"><span className="cap">{xScrub ? xScrub.label : xRangeOf(xpage) === "all" ? "Since first log" : RANGE_PRESETS.find((r) => r.key === xRangeOf(xpage)).label}</span></span>
+                    <span className="index-tag xp-tagline"><span>{xData.bw && xData.bw.repsMode ? "Best reps change" : "Est. max change"} · {xData.series.sessions} sessions</span><button type="button" className="edit-ex-btn xp-edit" onClick={() => openEditEx(xpage.exercise)}>Edit</button></span>
+                  </>
+                );
+              })()}
+            </div>
+            <div className="chart-box xp-chart">
+              {xData.series
+                ? <PortfolioChart rows={xData.series.rows} maRows={null} color={xData.series.pct >= 0 ? "var(--gain)" : "var(--loss)"} onScrub={setXScrub} />
+                : <div className="empty">Log this exercise on a few different days to see a graph.</div>}
+            </div>
+            <div className="pills range-tabs" style={{ marginBottom: 12 }} role="group" aria-label="Date range">
+              {RANGE_PRESETS.map((r) => (
+                <button key={r.key} type="button" className={"pill" + (r.key === xRangeOf(xpage) ? " active" : "")} onClick={() => { setXpage({ ...xpage, range: r.key, ytd: r.key === "ytd" }); setXScrub(null); }}><span className="tab-l">{r.label}</span></button>
+              ))}
+            </div>
+            <div className="digest-card2" style={{ cursor: "default" }}>
+              <div className="insights-head"><span className="label-sm" style={{ marginBottom: 0 }}>Summary</span></div>
+              <div className="dg-text open">{xData.summary}</div>
+              {xData.bw && xData.bw.isBw && !xData.bw.hasBw && <div className="helper" style={{ marginTop: 8 }}>Counting reps only. Add your body weight in Settings and added weight counts too.</div>}
+              {xData.bw && xData.bw.hasBw && <div className="helper" style={{ marginTop: 8 }}>Numbers include your body weight plus any weight you added.</div>}
+              {xStats && !(xData.bw && xData.bw.isBw) && xStats.volume > 0 && (() => { const t = compareLine(xStats.volume, xpage.exercise + xRangeOf(xpage)); return t ? <div className="compare-line">{fmtNum(W(xStats.volume))} {unit} moved in this range. {t}</div> : null; })()}
+            </div>
+
+            {xStats && (() => {
+              const pct = xData.series ? xData.series.pct : null;
+              const ago = (d) => { const n = Math.round((new Date(todayISO() + "T00:00:00") - new Date(d + "T00:00:00")) / 86400000); return n <= 0 ? "Today" : n === 1 ? "Yesterday" : `${n}d ago`; };
+              const cell = (label, value, color) => (<div className="st-cell" key={label}><div className="st-label">{label}</div><div className="st-val" style={color ? { color } : null}>{value}</div></div>);
+              return (
+                <div className="stats-block">
+                  <div className="st-grid">
+                    {xData.bw && xData.bw.repsMode ? cell("Best reps", xStats.e1rm) : cell("Est. max", W(xStats.e1rm))}
+                    {xData.bw && xData.bw.repsMode ? cell("Avg reps", xStats.e5rm) : cell("e5RM", W(xStats.e5rm))}
+                    {cell(xRangeOf(xpage) === "all" ? "Change" : RANGE_PRESETS.find((r) => r.key === xRangeOf(xpage)).label, pct === null ? "n/a" : `${pct >= 0 ? "+" : "−"}${Math.abs(pct).toFixed(1)}%`, pct === null ? null : pct >= 0 ? "var(--gain)" : "var(--loss)")}
+                    {xData.bw && xData.bw.repsMode ? cell("Total reps", fmtNum(xStats.reps)) : cell(`Volume (${unit})`, fmtNum(W(xStats.volume)))}
+                    {cell("Sessions", xStats.sessions)}
+                    {cell("Sets / Reps", `${xStats.sets} / ${fmtNum(xStats.reps)}`)}
+                    {cell(xData.bw && xData.bw.repsMode ? "Most reps" : "PR", xData.bw && xData.bw.repsMode ? xStats.prWeight : xData.bw && xData.bw.hasBw ? setWt(xStats.prEntry, W, unit).replace(` ${unit}`, "") : `${W(xStats.prWeight)}`)}
+                    {xData.bw && (xData.bw.repsMode || xData.bw.hasBw) ? null : cell("Avg wt / rep", xStats.avgPerRep ? W(xStats.avgPerRep) : "n/a")}
+                    {cell("Last session", ago(xStats.lastDate))}
+                  </div>
+                </div>
+              );
+            })()}
+
+            <div className="card flat" style={{ marginTop: 24 }}>
+              <div className="label-sm">All sessions · {xData.list.length}</div>
+              <div className="hist-list">
+                {xData.list.map((e) => (editingId === e.id ? renderEditableRow(e, true) : (
+                  <SwipeRow key={e.id} onEdit={() => startEdit(e)} onDelete={() => deleteEntry(e.id)}>
+                    <div className="hist-item hist-simple" style={{ opacity: e.isWarmup ? 0.6 : 1 }}>
+                      <button type="button" className={"hist-date" + (e.date === xpage.date ? " on" : "")} onClick={() => { setXpage({ ...xpage, date: e.date, ytd: false, range: "all" }); setXScrub(null); }}>{fmtDate(e.date)}</button>
+                      <span className="hist-nums">{setWt(e, W, unit, bwNames.has(e.exercise))} · {e.reps > 0 ? e.reps : 0} reps · {e.sets || 1} {(e.sets || 1) === 1 ? "set" : "sets"}{e.side && <span className="muted"> · {e.side === "L" ? "left" : "right"}</span>}{e.brand && <span className="muted"> · {e.brand}</span>}{e.isWarmup && <span className="muted"> · warm-up</span>}</span>
+                    </div>
+                  </SwipeRow>
+                )))}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {editEx && (
+        <>
+          <div className="sheet-backdrop" onClick={closeEdit} />
+          <div className="sheet" role="dialog" aria-label="Edit exercise">
+            <div className="sheet-grip" />
+            <div className="sheet-head">
+              <span className="sheet-title">Edit exercise</span>
+              <button className="close-btn" onClick={closeEdit} aria-label="Close">✕</button>
+            </div>
+            <button type="button" className="chip scan-btn" disabled={scanBusy} onClick={() => editScanRef.current && editScanRef.current.click()}>{scanBusy ? "Reading…" : "Scan machine with camera"}</button>
+            <input ref={editScanRef} type="file" accept="image/*" capture="environment" hidden onChange={(e) => scanMachine(e.target.files && e.target.files[0], true)} />
+            {scanMsg && <div className="helper" style={{ marginBottom: 8 }}>{scanMsg}</div>}
+            <div className="label-sm" style={{ marginBottom: 4 }}>Name</div>
+            <input value={editEx.name} onChange={(e) => setEditEx({ ...editEx, name: e.target.value, err: "" })} style={{ marginBottom: 10 }} />
+            <div className="label-sm" style={{ marginBottom: 4 }}>Ticker (optional)</div>
+            <input value={editEx.ticker || ""} onChange={(e) => setEditEx({ ...editEx, ticker: e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 5) })} placeholder={defaultTicker(editEx.name) || "e.g. BENCH"} style={{ marginBottom: 10 }} />
+            <div className="label-sm" style={{ marginBottom: 4 }}>Machine / brand (optional)</div>
+            <input value={editEx.brand} onChange={(e) => setEditEx({ ...editEx, brand: e.target.value })} list="machine-brands" placeholder="e.g. Life Fitness" style={{ marginBottom: 10 }} />
+            <datalist id="machine-brands">{MACHINE_BRANDS.map((b) => <option key={b} value={b} />)}</datalist>
+            <div className="helper" style={{ marginBottom: 10 }}>The brand is a label. Changing it keeps all your history on one progress line.</div>
+            <div className="side-row" style={{ marginBottom: 12 }} role="group" aria-label="Both sides or one at a time">
+              <button type="button" className={"chip" + (!editEx.oneSided ? " active" : "")} aria-pressed={!editEx.oneSided} onClick={() => setEditEx({ ...editEx, oneSided: false })}>Both sides</button>
+              <button type="button" className={"chip" + (editEx.oneSided ? " active" : "")} aria-pressed={editEx.oneSided} onClick={() => setEditEx({ ...editEx, oneSided: true })}>One side at a time</button>
+            </div>
+            <div className="side-row" style={{ marginBottom: 12 }} role="group" aria-label="Barbell or not">
+              <button type="button" className={"chip" + (editEx.barbell ? " active" : "")} aria-pressed={!!editEx.barbell} onClick={() => setEditEx({ ...editEx, barbell: true })}>Barbell (show plates)</button>
+              <button type="button" className={"chip" + (!editEx.barbell ? " active" : "")} aria-pressed={!editEx.barbell} onClick={() => setEditEx({ ...editEx, barbell: false })}>Not a barbell</button>
+            </div>
+            <div className="label-sm" style={{ marginBottom: 4 }}>Day(s)</div>
+            <div className="day-checks">
+              {workouts.map((w) => (
+                <label key={w.id} className={"day-check" + (editEx.days.includes(w.id) ? " on" : "")}>
+                  <input type="checkbox" checked={editEx.days.includes(w.id)} onChange={() => setEditEx({ ...editEx, err: "", days: editEx.days.includes(w.id) ? editEx.days.filter((x) => x !== w.id) : [...editEx.days, w.id] })} />
+                  {w.name}
+                </label>
+              ))}
+            </div>
+            <div className="newday-row">
+              <input value={editEx.newDay} onChange={(e) => setEditEx({ ...editEx, newDay: e.target.value })} placeholder="New day (e.g. Shoulders)" maxLength={20} />
+              <button type="button" className="chip" disabled={!editEx.newDay.trim()} onClick={() => { const id = addDay(editEx.newDay); if (id) setEditEx((x) => ({ ...x, days: x.days.includes(id) ? x.days : [...x.days, id], newDay: "" })); }}>Add day</button>
+            </div>
+            {editEx.err && <div className="warn" style={{ marginTop: 10 }}>{editEx.err}</div>}
+            <button className="btn-iron save-btn" style={{ marginTop: 14 }} onClick={saveEditEx}>Save</button>
+            <button type="button" className="btn-danger" style={{ marginTop: 14 }} onClick={() => { const n = editEx.orig; setEditEx(null); deleteExercise(n); }}>Delete {editEx.orig} and all its sets</button>
+          </div>
+        </>
+      )}
+      {notesOpen && (
+        <>
+          <div className="sheet-backdrop" onClick={closeNotes} />
+          <div className="sheet notes-sheet" role="dialog" aria-label="Log from notes photo">
+            <div className="sheet-grip" />
+            <div className="sheet-head">
+              <span className="sheet-title">Log from notes</span>
+              <button className="close-btn" onClick={closeNotes} aria-label="Close" disabled={notesBusy}>✕</button>
+            </div>
+            <div className="helper" style={{ marginBottom: 8 }}>{notesMsg}</div>
+            {notesRows.length > 0 && (
+              <>
+                <div className="notes-top">
+                  <label className="notes-field"><span className="label-sm">Date</span><input type="date" value={notesDate} max={todayISO()} onChange={(e) => setNotesDate(e.target.value)} /></label>
+                  <label className="notes-field"><span className="label-sm">New exercises go to</span>
+                    <select className="scope" value={notesDay} onChange={(e) => setNotesDay(e.target.value)}>{workouts.map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}</select>
+                  </label>
+                </div>
+                <datalist id="notes-ex">{allExerciseNames.map((n) => <option key={n} value={n} />)}</datalist>
+                {notesRows.map((r) => (
+                  <div key={r.id} className={"notes-row" + (r.keep ? "" : " off") + (r.sure ? "" : " unsure")}>
+                    <input className="notes-ex" list="notes-ex" value={r.exercise} onChange={(e) => setNotesRow(r.id, { exercise: e.target.value, match: allExerciseNames.some((n) => n.toLowerCase() === e.target.value.trim().toLowerCase()) })} aria-label="Exercise" />
+                    <div className="notes-nums">
+                      <input inputMode="decimal" value={r.weight} onChange={(e) => setNotesRow(r.id, { weight: e.target.value })} aria-label={`Weight (${unit})`} />
+                      <span>×</span>
+                      <input inputMode="numeric" value={r.reps} onChange={(e) => setNotesRow(r.id, { reps: e.target.value })} aria-label="Reps" />
+                      <span>×</span>
+                      <input inputMode="numeric" value={r.sets} onChange={(e) => setNotesRow(r.id, { sets: e.target.value })} aria-label="Sets" />
+                      <button type="button" className={"chip" + (r.warmup ? " active" : "")} aria-pressed={r.warmup} onClick={() => setNotesRow(r.id, { warmup: !r.warmup })}>W</button>
+                      <button type="button" className="clear-x" aria-label="Remove line" onClick={() => setNotesRow(r.id, { keep: !r.keep })}>{r.keep ? "✕" : "↺"}</button>
+                    </div>
+                    <div className="notes-meta">{r.keep && !allExerciseNames.some((n) => n.toLowerCase() === r.exercise.trim().toLowerCase()) ? "New exercise · " : ""}{!r.sure ? "Check this one · " : ""}{r.raw ? `“${r.raw}”` : ""}</div>
+                  </div>
+                ))}
+                <button className="btn-iron save-btn" style={{ marginTop: 12 }} onClick={saveNotes} disabled={!notesRows.some((r) => r.keep)}>Save {notesRows.filter((r) => r.keep).length} {notesRows.filter((r) => r.keep).length === 1 ? "line" : "lines"} ({unit})</button>
+              </>
+            )}
+          </div>
+        </>
+      )}
+      {notesToast && <div className="undo-toast">{notesToast}</div>}
+
+      {legalDoc && (
+        <>
+          <div className="sheet-backdrop" style={{ zIndex: 1300 }} onClick={() => setLegalDoc(null)} />
+          <div className="sheet sheet-settings" style={{ zIndex: 1301 }} role="dialog" aria-label={LEGAL_DOCS[legalDoc].title}>
+            <div className="sheet-grip" />
+            <div className="sheet-head">
+              <span className="sheet-title">{LEGAL_DOCS[legalDoc].title}</span>
+              <button className="close-btn" onClick={() => setLegalDoc(null)} aria-label="Close">✕</button>
+            </div>
+            <LegalBody doc={LEGAL_DOCS[legalDoc]} />
+          </div>
+        </>
+      )}
+      {settingsOpen && (
+        <>
+          <div className="sheet-backdrop" onClick={() => setSettingsOpen(false)} />
+          <div className="sheet sheet-settings" role="dialog" aria-label="Settings">
+            <div className="sheet-grip" />
+            <div className="sheet-head">
+              <span className="sheet-title">Settings <span className="ver-tag">{BUILD_TAG}</span></span>
+              <button className="close-btn" onClick={() => setSettingsOpen(false)} aria-label="Close settings">✕</button>
+            </div>
+
+            <button type="button" className="add-ex-link" style={{ marginBottom: 12 }} onClick={() => { setSettingsOpen(false); setTimeout(startTutorial, 250); }}>Replay tutorial</button>
+            <div className="label-sm">Appearance</div>
+            <div className="pills">
+              {[["dark", "Dark"], ["light", "Light"], ["system", "Match phone"]].map(([k, label]) => (
+                <button key={k} className={"pill" + (settings.mode === k ? " active" : "")} onClick={() => updateSettings({ mode: k })}>{label}</button>
+              ))}
+            </div>
+
+
+            <div className="label-sm" style={{ marginTop: 16 }}>Body weight (optional)</div>
+            <div className="helper" style={{ marginBottom: 6 }}>Used for pull-ups, dips and push-ups, so added weight counts toward progress.</div>
+            <input type="number" inputMode="decimal" placeholder={unit} defaultValue={settings.bodyWeight ? W(settings.bodyWeight) : ""} onBlur={(e) => { const v = Number(e.target.value); updateSettings({ bodyWeight: v > 0 ? toLbs(v) : 0 }); }} style={{ marginBottom: 6 }} />
+            <div className="label-sm" style={{ marginTop: 16 }}>Lifter's Digest</div>
+            <label className="toggle-row"><span>AI digest (more detail and the likely why)</span><input type="checkbox" role="switch" className="ios-switch" checked={settings.ai} onChange={(e) => updateSettings({ ai: e.target.checked })} /></label>
+            <div className="select-wrap">
+              <select className="scope" value={settings.goal} onChange={(e) => updateSettings({ goal: e.target.value })} aria-label="Training goal">
+                {GOALS.map((g) => <option key={g.key} value={g.key}>Goal: {g.label}</option>)}
+              </select>
+            </div>
+
+            <div className="label-sm" style={{ marginTop: 16 }}>Comparisons</div>
+            <label className="toggle-row"><span>Playful one-liners (jokes with the comparisons)</span><input type="checkbox" role="switch" className="ios-switch" checked={!!settings.playful} onChange={(e) => updateSettings({ playful: e.target.checked })} /></label>
+            <div className="label-sm" style={{ marginTop: 16 }}>Sounds &amp; vibration</div>
+            <label className="toggle-row"><span>Sounds (log a set, rest timer)</span><input type="checkbox" role="switch" className="ios-switch" checked={settings.sound} onChange={(e) => updateSettings({ sound: e.target.checked })} /></label>
+            {canVibrate && <label className="toggle-row"><span>Vibration</span><input type="checkbox" role="switch" className="ios-switch" checked={settings.vibe} onChange={(e) => updateSettings({ vibe: e.target.checked })} /></label>}
+
+            <div className="label-sm" style={{ marginTop: 16 }}>Legal</div>
+            <div style={{ display: "flex", gap: 8, marginBottom: 4 }}>
+              <button type="button" className="pill" onClick={() => setLegalDoc("privacy")}>Privacy Policy</button>
+              <button type="button" className="pill" onClick={() => setLegalDoc("terms")}>Terms of Use</button>
+            </div>
+            <div className="label-sm" style={{ marginTop: 16 }}>Tell us what you think</div>
+            <textarea className="feedback-box" rows={3} value={feedbackText} onChange={(e) => { setFeedbackText(e.target.value); setFeedbackStatus(""); }} placeholder="What's confusing, missing or great?" />
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
+              <button className="btn-iron" style={{ padding: "8px 16px", fontSize: "var(--fs-label)" }} onClick={sendFeedback} disabled={!feedbackText.trim()}>Send feedback</button>
+              <span className="muted" style={{ fontSize: "var(--fs-label)" }}>{feedbackStatus}</span>
+            </div>
+            {me && me.role === "owner" && (
+              <div style={{ marginTop: 12 }}>
+                <button className="add-ex-link" style={{ marginBottom: 8 }} onClick={loadFeedback}>View feedback from testers</button>
+                {feedbackList && (feedbackList.length === 0 ? <div className="muted" style={{ fontSize: "var(--fs-label)" }}>Nothing yet.</div> : (
+                  <div className="today-list">
+                    {feedbackList.map((f, i) => (
+                      <div key={i} className="hist-item" style={{ display: "block" }}>
+                        <div className="muted" style={{ fontSize: "var(--fs-label)" }}>{f.name} · {new Date(f.at).toLocaleString()}</div>
+                        <div style={{ fontSize: "var(--fs-label)", marginTop: 0 }}>{f.message}</div>
+                      </div>
+                    ))}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <div className="label-sm" style={{ marginTop: 16 }}>Your data</div>
+            <div className="helper" style={{ marginBottom: 8 }}>CSV opens in Excel, Sheets or Numbers. The JSON backup is a full copy of everything. Keep it somewhere safe.</div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <button className="pill" style={{ flex: "1 1 auto", padding: "8px 12px" }} onClick={exportCSV}>Download CSV</button>
+              <button className="pill" style={{ flex: "1 1 auto", padding: "8px 12px" }} onClick={exportJSON}>Download JSON backup</button>
+              <button className="pill" style={{ flex: "1 1 auto", padding: "8px 12px" }} onClick={signOut}>Reset demo data</button>
+            </div>
+          </div>
+        </>
+      )}
+
+      {tutIdx !== null && (
+        <TutorialOverlay steps={tutSteps} idx={tutIdx} setIdx={setTutIdx} onEnd={endTutorial} waitDone={!!(tutSteps[tutIdx] && tutSteps[tutIdx].wait && tutSteps[tutIdx].wait())} />
+      )}
+
+      {(restTimer || dockVisible) && loaded && !feedOpen && (
+        <div className="dock" ref={dockRef}>
+          {restTimer && (
+            <div className={"rest-bar" + (restRemaining <= 0 ? " done" : "")}>
+              <div className="rest-fill" style={{ width: `${Math.min(100, Math.max(0, (1 - restRemaining / restTimer.total) * 100))}%` }} />
+              <span className="rest-label">{restRemaining <= 0 ? "Rest over, go" : `Rest ${fmtClock(restRemaining)}`}<span className="rest-ex"> · {restTimer.exercise}</span></span>
+              <span className="rest-btns">
+                <button onClick={() => nudgeRest(-15)}>−15</button>
+                <button onClick={() => nudgeRest(15)}>+15</button>
+                <button onClick={() => setRestTimer(null)} aria-label="Dismiss timer">✕</button>
+              </span>
+            </div>
+          )}
+          {dockVisible && (
+            <button ref={(el) => { saveBtnRef.current = el; if (el) { el.style.setProperty("--dp", String(dpRef.current)); el.style.pointerEvents = dpRef.current > 0.5 ? "auto" : "none"; } }} className="btn-iron save-btn dock-save" onClick={() => submitSet()} disabled={!form.exercise.trim() || !form.weight} style={{ "--en": form.exercise.trim() && form.weight ? 1 : 0.55 }}>
+              {form.exercise.trim() ? `Log set · ${form.exercise.trim()}` : "Log set"}
+            </button>
+          )}
+        </div>
+      )}
+
+      {feedOpen && <FeedPage />}
+      <div className="feed-fab-wrap"><button type="button" className={"feed-fab" + (feedOpen ? " on" : "")} aria-label="Social feed" aria-pressed={feedOpen} onClick={() => setFeedOpen((v) => !v)}><DotIcon rows={DOT_PEOPLE} color="currentColor" size={24} /><span>Feed</span></button></div>
+
+      <div className="status-fade" aria-hidden="true" />
+      <div className="nav-scrim" aria-hidden="true" />
+      <div className={"bottom-nav" + (feedOpen ? " feed-on" : "")} ref={navRef} style={{ "--i": activeSection === "charts" ? 2 : activeSection === "home" ? 1 : 0 }}>
+        <span className="nav-lens" aria-hidden="true" />
+
+        <button aria-label="Home" className={"bottom-nav-item bottom-nav-item-main" + (!feedOpen && activeSection === "portfolio" ? " active" : "")} onClick={() => { setFeedOpen(false); scrollToSection("portfolio"); }}>
+          <DotIcon rows={DOT_HOME} color="currentColor" /><span>Home</span>
         </button>
-        <button className={"bottom-nav-item" + (activeSection === "charts" ? " active" : "")} onClick={() => scrollToSection("charts")}>
-          <IconChart color={activeSection === "charts" ? "var(--iron)" : "var(--mute)"} /><span>Progress</span>
+        <button aria-label="Workout" className={"bottom-nav-item" + (!feedOpen && activeSection === "home" ? " active" : "")} onClick={() => { setFeedOpen(false); scrollToSection("home"); }}>
+          <DotIcon rows={DOT_LIFT} color="currentColor" /><span>Workout</span>
         </button>
-        <button className={"bottom-nav-item bottom-nav-item-main" + (activeSection === "portfolio" ? " active" : "")} onClick={() => scrollToSection("portfolio")}>
-          <IconHome color={activeSection === "portfolio" ? "var(--iron)" : "var(--mute)"} size={30} /><span>Overall</span>
+        <button aria-label="Progress" className={"bottom-nav-item" + (!feedOpen && activeSection === "charts" ? " active" : "")} onClick={() => { setFeedOpen(false); scrollToSection("charts"); }}>
+          <DotIcon rows={DOT_CHART} color="currentColor" /><span>Progress</span>
         </button>
-        <button className={"bottom-nav-item" + (activeSection === "home" ? " active" : "")} onClick={() => scrollToSection("home")}>
-          <IconBulb color={activeSection === "home" ? "var(--iron)" : "var(--mute)"} /><span>Workout</span>
-        </button>
-        <button className={"bottom-nav-item" + (activeSection === "goal" ? " active" : "")} onClick={() => scrollToSection("goal")}>
-          <IconTarget color={activeSection === "goal" ? "var(--iron)" : "var(--mute)"} /><span>Goal</span>
-        </button>
+
       </div>
     </div>
     </>
