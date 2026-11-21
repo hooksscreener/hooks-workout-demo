@@ -34,7 +34,7 @@ const MA_OPTIONS = [
 const MONTH_NAMES = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 const WD = ["S","M","T","W","T","F","S"];
 const RANGE_WORDS = { "1m": "the last month", "3m": "the last 3 months", "6m": "the last 6 months", ytd: "this year", "1y": "the last year", all: "all time" };
-const BUILD_TAG = "Build 65 · Nov 16";
+const BUILD_TAG = "Build 66 · Nov 20";
 const MACHINE_BRANDS = ["Hammer Strength", "Life Fitness", "Cybex", "Hoist", "Precor", "Technogym", "Matrix", "Nautilus", "Gym80", "Panatta", "Atlantis", "Body-Solid", "Prime", "Rogue", "Arsenal Strength", "Plate Loaded", "Cable", "Smith Machine"];
 const PASSCODE_KEY = "hooksAppPasscode";
 const CACHE_KEY = "hooksCache";     // last full copy of your data, kept on this phone so the app opens offline
@@ -3301,13 +3301,13 @@ export default function Home() {
                   if (!exact) setRecExercise(null);
                 }}
                 onFocus={(e) => { setShowSuggestions(true); setTimeout(() => e.target.scrollIntoView({ behavior: (typeof window !== "undefined" && window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) ? "auto" : "smooth", block: "center" }), 300); }}
-                onBlur={() => setTimeout(() => setShowSuggestions(false), 150)}
+                onBlur={() => setTimeout(() => setShowSuggestions(false), 400)}
               />
               {form.exercise.trim() && <ClearX label="Clear exercise" onClick={clearForm} />}
               {showSuggestions && suggestions.length > 0 && (
                 <div className="suggestions">
                   {suggestions.map((s) => (
-                    <button key={s} onClick={() => selectExercise(s)}>{displayEx(s)}</button>
+                    <button key={s} onPointerDown={(ev) => { ev.preventDefault(); selectExercise(s); }} onClick={() => selectExercise(s)}>{displayEx(s)}</button>
                   ))}
                 </div>
               )}
@@ -3504,12 +3504,12 @@ export default function Home() {
                   value={progOpen ? progQuery : (chartFocusExercise || "")}
                   onChange={(e) => setProgQuery(e.target.value)}
                   onFocus={(e) => { setProgOpen(true); setProgQuery(""); e.target.select && e.target.select(); }}
-                  onBlur={() => setTimeout(() => setProgOpen(false), 150)}
+                  onBlur={() => setTimeout(() => setProgOpen(false), 400)}
                 />
                 {(chartFocusExercise || progQuery) && <ClearX label="Clear exercise" onClick={() => { setProgCleared(true); setChartFocusExercise(null); setProgQuery(""); setMergeOpen(false); setHistoryAll(false); setEditingId(null); }} />}
                 {progOpen && matches.length > 0 && (
                   <div className="suggestions">
-                    {matches.map((s2) => <button key={s2} onMouseDown={(ev) => ev.preventDefault()} onClick={() => pickProg(s2)}>{s2}</button>)}
+                    {matches.map((s2) => <button key={s2} onPointerDown={(ev) => { ev.preventDefault(); pickProg(s2); }} onClick={() => pickProg(s2)}>{s2}</button>)}
                   </div>
                 )}
               </div>
