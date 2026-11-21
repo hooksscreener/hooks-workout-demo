@@ -34,11 +34,10 @@ const MA_OPTIONS = [
 const MONTH_NAMES = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 const WD = ["S","M","T","W","T","F","S"];
 const RANGE_WORDS = { "1m": "the last month", "3m": "the last 3 months", "6m": "the last 6 months", ytd: "this year", "1y": "the last year", all: "all time" };
-const BUILD_TAG = "Demo · Build 65";
+const BUILD_TAG = "Build 65 · Nov 16";
 const MACHINE_BRANDS = ["Hammer Strength", "Life Fitness", "Cybex", "Hoist", "Precor", "Technogym", "Matrix", "Nautilus", "Gym80", "Panatta", "Atlantis", "Body-Solid", "Prime", "Rogue", "Arsenal Strength", "Plate Loaded", "Cable", "Smith Machine"];
 const PASSCODE_KEY = "hooksAppPasscode";
-const DEMO = true; // demo build: no passcode, no server; sample data lives in this browser only
-const CACHE_KEY = "hooksDemoCache";     // last full copy of your data, kept on this phone so the app opens offline
+const CACHE_KEY = "hooksCache";     // last full copy of your data, kept on this phone so the app opens offline
 const PENDING_KEY = "hooksPending"; // "1" while this phone has changes the server has not received yet
 
 const pad = (n) => String(n).padStart(2, "0");
@@ -949,7 +948,7 @@ const HONEY_COLORS = [
   "#ff4d4d", "#ff8a5c", "#ffd24d", "#c4e86b", "#38d9a9", "#66d9e8", "#4dabf7", "#8aa0ff", "#da77f2", "#f783ac", "#ff9aa2", "#ff6ec7",
 ];
 const useIsoLayoutEffect = typeof window !== "undefined" ? useLayoutEffect : useEffect;
-const DEFAULT_SETTINGS = { bodyWeight: 175, mode: "dark", accent: "#ff6600", sound: true, vibe: true, ai: true, goal: "strength", fontText: "ibm-plex-sans", fontV: 2, fontNum: "jetbrains-mono", glass: true, gl: "ios", unit: "lbs", dotNums: true, bodyWeight: 0 };
+const DEFAULT_SETTINGS = { mode: "dark", accent: "#ff6600", sound: true, vibe: true, ai: true, goal: "strength", fontText: "ibm-plex-sans", fontV: 2, fontNum: "jetbrains-mono", glass: true, gl: "ios", unit: "lbs", dotNums: true, bodyWeight: 0 };
 const TEXT_FONTS = [["space-grotesk", "Space Grotesk"], ["ibm-plex-sans", "IBM Plex Sans"], ["barlow", "Barlow"], ["inter", "Inter"], ["sf-pro", "SF Pro (system)"]];
 const NUM_FONTS = [["jetbrains-mono", "JetBrains Mono"], ["ibm-plex-mono", "IBM Plex Mono"], ["sf-mono", "SF Mono (system)"], ["space-mono", "Space Mono"], ["same", "Same as text font"]];
 const GOALS = [
@@ -1549,9 +1548,9 @@ function buildDemoData() {
   const rnd = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296; };
   const plan = [
     [0, "push", [["Bench Press", 155, 8], ["Incline Barbell Press", 115, 8], ["Barbell Shoulder Press", 85, 8]]],
-    [1, "pull", [["Deadlift", 225, 5], ["Barbell Rows", 115, 8], ["Close-Grip Lat Pulldown", 110, 10], ["Pull-Ups", 0, 6]]],
-    [3, "arms", [["Barbell Curl", 65, 10], ["Skull Crushers", 60, 10], ["Hammer Curl", 35, 10]]],
-    [4, "legsA", [["Squats", 205, 6], ["Leg Press", 320, 10], ["Romanian Deadlift", 185, 8], ["Calf Raises", 135, 15]]],
+    [1, "pull", [["Deadlift", 225, 5], ["Barbell Rows", 115, 8], ["Close-Grip Lat Pulldown", 110, 10]]],
+    [3, "arms", [["Barbell Curl", 65, 10], ["Skull Crushers", 60, 10]]],
+    [4, "legsA", [["Squats", 205, 6], ["Leg Press", 320, 10], ["Romanian Deadlift", 185, 8]]],
   ];
   const today = todayISO(), thisWeek = weekStartISO(today), out = [];
   for (let w = 25; w >= 0; w--) {
@@ -1559,10 +1558,8 @@ function buildDemoData() {
       const date = shiftDate(thisWeek, -w * 7 + dow);
       if (date > today || (wid === "legsA" && w <= 1)) return;
       lifts.forEach(([exercise, base, reps]) => {
-        const bwLift = base === 0; // bodyweight: reps climb instead of weight
-        const weight = bwLift ? 0 : Math.round((base * (1 + (25 - w) * 0.006) - (rnd() < 0.25 ? 5 : 0)) / 5) * 5;
-        const repsDone = bwLift ? reps + Math.floor((25 - w) / 4) : reps - (rnd() < 0.3 ? 1 : 0);
-        out.push({ id: `demo-${date}-${exercise}`, workoutId: wid, exercise, weight, sets: 3, reps: repsDone, date, isWarmup: false });
+        const weight = Math.round((base * (1 + (25 - w) * 0.006) - (rnd() < 0.25 ? 5 : 0)) / 5) * 5;
+        out.push({ id: `demo-${date}-${exercise}`, workoutId: wid, exercise, weight, sets: 3, reps: reps - (rnd() < 0.3 ? 1 : 0), date, isWarmup: false });
       });
     });
   }
@@ -1690,7 +1687,8 @@ export default function Home() {
 
   // load saved passcode from this browser
   useEffect(() => {
-    setPasscode("demo");
+    const saved = typeof window !== "undefined" ? localStorage.getItem(PASSCODE_KEY) : null;
+    setPasscode(saved || "");
   }, []);
 
   const loadData = async (code) => {
@@ -1698,8 +1696,7 @@ export default function Home() {
       let cached = null, pending = false;
       try { cached = JSON.parse(localStorage.getItem(CACHE_KEY) || "null"); pending = localStorage.getItem(PENDING_KEY) === "1"; } catch (e) { /* ignore */ }
       let data = null;
-      if (DEMO) { data = cached && cached.entries ? cached : { ...buildDemoData(), restDays: [], progressionMode: "weight", tickers: {}, restTimes: {}, exMeta: {} }; pending = false; }
-      else try {
+      try {
         const res = await fetch("/api/data", { headers: { "x-app-passcode": code } });
         if (res.status === 401) {
           setAuthError("Wrong passcode.");
@@ -1714,7 +1711,7 @@ export default function Home() {
         setPendingSync(true);
       }
       if (pending && cached) { data = cached; setPendingSync(true); } // this phone has newer changes than the server: keep them and send them up
-      else if (!DEMO && data && data.entries) { try { localStorage.setItem(CACHE_KEY, JSON.stringify(data)); } catch (e) { /* ignore */ } }
+      else if (data && data.entries) { try { localStorage.setItem(CACHE_KEY, JSON.stringify(data)); } catch (e) { /* ignore */ } }
       let nextWorkouts = data.workouts || DEFAULT_WORKOUTS;
       let nextExercises = data.exercises || DEFAULT_EXERCISES;
       let nextEntries = data.entries || [];
@@ -1820,13 +1817,11 @@ export default function Home() {
   const authHeaders = () => ({ "x-app-passcode": passcode });
   useEffect(() => {
     if (!passcode) return;
-    if (DEMO) return;
     fetch("/api/me", { headers: { "x-app-passcode": passcode } }).then((r) => (r.ok ? r.json() : null)).then((d) => { if (d) setMe(d); }).catch(() => {});
   }, [passcode]);
   const sendFeedback = async () => {
     const message = feedbackText.trim();
     if (!message) return;
-    if (DEMO) { setFeedbackText(""); setFeedbackStatus("Feedback is turned off in the demo."); return; }
     setFeedbackStatus("Sending…");
     try {
       const res = await fetch("/api/feedback", { method: "POST", headers: { "Content-Type": "application/json", ...authHeaders() }, body: JSON.stringify({ message }) });
@@ -1839,7 +1834,7 @@ export default function Home() {
       if (res.ok) setFeedbackList((await res.json()).items || []);
     } catch (e) { /* ignore */ }
   };
-  const signOut = () => { try { localStorage.removeItem(CACHE_KEY); localStorage.removeItem("hooksTutorialDone"); } catch (e) { /* ignore */ } window.location.reload(); };
+  const signOut = () => { try { localStorage.removeItem(PASSCODE_KEY); } catch (e) { /* ignore */ } window.location.reload(); };
 
   const demoRef = useRef(false);
   const persist = async (next) => {
@@ -1857,12 +1852,13 @@ export default function Home() {
     setExMeta(payload.exMeta || {});
     setWorkouts(payload.workouts); setExercises(payload.exercises); setEntries(payload.entries); setRestDays(payload.restDays); setProgressionMode(payload.progressionMode);
     // Always keep a copy on this phone first, so nothing is lost if the connection drops.
-    try { localStorage.setItem(CACHE_KEY, JSON.stringify(payload)); } catch (e) { /* ignore */ }
+    try { localStorage.setItem(CACHE_KEY, JSON.stringify(payload)); localStorage.setItem(PENDING_KEY, "1"); } catch (e) { /* ignore */ }
+    setPendingSync(true);
+    await flushPending();
   };
   // Sends the copy saved on this phone to the server. Safe to call any time; it does nothing when there is nothing waiting.
   const flushingRef = useRef(false);
   const flushPending = async () => {
-    if (DEMO) return;
     if (flushingRef.current) return;
     let raw = null;
     try { if (localStorage.getItem(PENDING_KEY) !== "1") { setPendingSync(false); return; } raw = localStorage.getItem(CACHE_KEY); } catch (e) { return; }
@@ -1880,7 +1876,7 @@ export default function Home() {
     flushingRef.current = false;
   };
   useEffect(() => {
-    if (!passcode || DEMO) return undefined;
+    if (!passcode) return undefined;
     const go = () => { flushPending(); };
     window.addEventListener("online", go);
     document.addEventListener("visibilitychange", go);
@@ -2001,7 +1997,6 @@ export default function Home() {
   const [notesToast, setNotesToast] = useState("");
   const scanNotes = async (file) => {
     if (!file) return;
-    if (DEMO) { setNotesOpen(true); setNotesBusy(false); setNotesRows([]); setNotesMsg("The notes camera is turned off in the demo."); return; }
     setNotesOpen(true); setNotesBusy(true); setNotesMsg("Reading your notes…"); setNotesRows([]);
     setNotesDate(todayISO()); setNotesDay(activeWorkoutId || (workouts[0] && workouts[0].id) || "");
     try {
@@ -2058,7 +2053,6 @@ export default function Home() {
   const apiWhy = async (res) => { let j = null; try { j = await res.json(); } catch (e) { /* ignore */ } const bits = [res.status, j && j.error, j && j.upstream ? `upstream ${j.upstream}` : "", j && j.detail ? String(j.detail).replace(/\s+/g, " ").slice(0, 120) : ""].filter(Boolean); return bits.join(" · "); };
   const scanMachine = async (file, forEdit = false) => {
     if (!file) return;
-    if (DEMO) { setScanMsg("The camera is turned off in the demo. Type the name instead."); return; }
     setScanBusy(true); setScanMsg("Reading the machine…");
     try {
       const image = await shrinkImage(file);
@@ -2596,7 +2590,7 @@ export default function Home() {
     window.scrollTo(0, 0);
   };
   useEffect(() => {
-    if (!loaded || (entries.length && !DEMO) || demoRef.current) return;
+    if (!loaded || entries.length || demoRef.current) return;
     try { if (!localStorage.getItem("hooksTutorialDone")) setTimeout(startTutorial, 400); } catch (e) { /* ignore */ }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loaded, entries.length]);
@@ -2778,7 +2772,7 @@ export default function Home() {
   const [aiDigest, setAiDigest] = useState(null);
   useEffect(() => {
     setAiDigest(null);
-    if (DEMO || !digestStats || !passcode || !settings.ai || demoRef.current) return undefined;
+    if (!digestStats || !passcode || !settings.ai || demoRef.current) return undefined;
     let cancelled = false;
     const key = `hooksDigest2:${todayISO()}:${digestSig}`;
     try { const c = localStorage.getItem(key); if (c) { setAiDigest(JSON.parse(c)); return undefined; } } catch (e) { /* ignore */ }
@@ -3887,7 +3881,7 @@ export default function Home() {
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
               <button className="pill" style={{ flex: "1 1 auto", padding: "8px 12px" }} onClick={exportCSV}>Download CSV</button>
               <button className="pill" style={{ flex: "1 1 auto", padding: "8px 12px" }} onClick={exportJSON}>Download JSON backup</button>
-              <button className="pill" style={{ flex: "1 1 auto", padding: "8px 12px" }} onClick={signOut}>Reset demo data</button>
+              <button className="pill" style={{ flex: "1 1 auto", padding: "8px 12px" }} onClick={signOut}>Sign out{me ? ` (${me.name})` : ""}</button>
             </div>
           </div>
         </>

@@ -1,20 +1,47 @@
-# CapitalGains demo
+# Hooks Workout
 
-A copy of the app that opens with sample data and no passcode. There is no database and no server storage.
+A personal workout tracker with a real database — synced across every device, no browser storage tricks.
 
-- Sample data (26 weeks of lifts) loads the first time someone opens it.
-- Anything a visitor logs or changes stays in their own browser only. Settings has a "Reset demo data" button.
-- The first-open tutorial runs automatically on the first visit.
-- The camera features and tester feedback are turned off.
-- The feed shows invented sample people.
+## What this is
+- Next.js app, deployed on Vercel (same platform as your screener)
+- Data stored in Upstash Redis (Vercel's current recommended key-value store — Vercel KV itself is deprecated)
+- A single shared passcode gates the app so it isn't wide open to the internet
 
-## Publish it
-1. Put these files in a new GitHub repo (not the repo for your real app).
-2. On vercel.com choose Add New, then Project, import that repo, and click Deploy. No environment variables are needed.
-3. Share the `.vercel.app` link.
+## Deploy it (same flow as hooks-screener)
 
-## Run it on your computer
+1. **Push to GitHub**
+   ```
+   cd hooks-workout-app
+   git init
+   git add .
+   git commit -m "Initial commit"
+   git remote add origin https://github.com/<your-username>/hooks-workout.git
+   git push -u origin main
+   ```
+
+2. **Import into Vercel**
+   - vercel.com → Add New → Project → import the `hooks-workout` repo
+   - Framework preset: Next.js (auto-detected) — just click Deploy once (first deploy will work, but data storage won't until step 3)
+
+3. **Add a Redis database**
+   - In the Vercel project → Storage tab → Create Database (or Marketplace → search "Redis") → choose the Upstash integration
+   - This auto-injects `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` into your project's environment variables — you don't need to copy these by hand
+
+4. **Set your passcode**
+   - Project → Settings → Environment Variables → add `APP_PASSCODE` = something only you know
+   - Redeploy (Settings changes need a redeploy to take effect — Vercel will prompt you)
+
+5. **Use it anywhere**
+   - Visit your `*.vercel.app` URL on your phone, enter the passcode once (it's remembered on that device from then on)
+   - Do the same on your laptop — same passcode, same data, both read/write the same Redis store
+
+## Local development (optional)
 ```
 npm install
+cp .env.local.example .env.local   # fill in the three values
 npm run dev
 ```
+
+## Notes
+- This is single-user by design — one passcode, one shared dataset. Don't share the passcode.
+- If you ever want a proper multi-device login (instead of one shared passcode), that's a bigger add — happy to help when you're there.

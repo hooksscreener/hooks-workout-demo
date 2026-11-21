@@ -16,9 +16,9 @@ export default function Document() {
         <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
         <meta name="apple-mobile-web-app-capable" content="yes" />
         <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-        <meta name="apple-mobile-web-app-title" content="CapitalGains Demo" />
+        <meta name="apple-mobile-web-app-title" content="Hooks Workout" />
         <meta name="theme-color" content="#000000" />
-        <title>Capital Gains Demo: strength tracker</title>
+        <title>Capital Gains: strength tracker</title>
         <meta name="description" content="Track every lift and never stall. Log sets, see your strength as a stock chart, and get a target for your next session." />
         <meta property="og:title" content="Capital Gains" />
         <meta property="og:description" content="Track every lift and never stall." />
